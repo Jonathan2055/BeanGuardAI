@@ -1,5 +1,58 @@
-"""Model: evaluation functions (more functions are added in the next step)."""
+"""Model: building, fine-tuning settings and evaluation."""
 import numpy as np
+from tensorflow import keras
+from tensorflow.keras import layers, regularizers
+
+from src.config import IMG_SIZE
+from src.preprocessing import build_augmentation
+
+
+def build_model(num_classes, pretrained=True):
+    """MobileNetV2 (pre-trained on ImageNet) + a small new classification head.
+    The model takes raw images (0-255): rescaling and augmentation are inside the model."""
+    base = keras.applications.MobileNetV2(
+        input_shape=IMG_SIZE + (3,),
+        include_top=False,                                  # remove ImageNet's 1000-class output
+        weights="imagenet" if pretrained else None,
+    )
+    base.trainable = False                                  # phase 1: keep the pre-trained knowledge
+
+    inputs = keras.Input(shape=IMG_SIZE + (3,))
+    x = build_augmentation()(inputs)                        # only active while training
+    x = layers.Rescaling(1 / 127.5, offset=-1)(x)           # 0-255 -> -1...1 (what MobileNetV2 expects)
+    x = base(x, training=False)
+    x = layers.GlobalAveragePooling2D()(x)
+    x = layers.Dropout(0.3)(x)
+    outputs = layers.Dense(num_classes, activation="softmax",
+                           kernel_regularizer=regularizers.l2(1e-4))(x)
+    return keras.Model(inputs, outputs, name="bean_leaf_classifier")
+
+
+def compile_model(model, learning_rate):
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+
+
+def find_base(model):
+    """Return the MobileNetV2 part of the model."""
+    for layer in model.layers:
+        if layer.name.startswith("mobilenetv2"):
+            return layer
+    raise ValueError("MobileNetV2 base not found in the model")
+
+
+def unfreeze_top_layers(model, n_layers=30):
+    """Fine-tuning: let the last n layers of MobileNetV2 learn (BatchNormalization stays frozen)."""
+    base = find_base(model)
+    base.trainable = True
+    for layer in base.layers[:-n_layers]:
+        layer.trainable = False
+    for layer in base.layers:
+        if isinstance(layer, layers.BatchNormalization):
+            layer.trainable = False
 
 
 def predict_all(model, dataset):
