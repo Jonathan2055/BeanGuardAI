@@ -48,13 +48,12 @@ def make_dataset(paths, labels, shuffle=False):
 
 def build_augmentation():
     """Random changes applied to training images. Only active during training."""
-    return keras.Sequential([
+        return keras.Sequential([
         layers.RandomFlip("horizontal_and_vertical"),
         layers.RandomRotation(0.05),
         layers.RandomZoom(0.1),
-        layers.RandomContrast(0.1),
-        layers.RandomBrightness(0.3, value_range=(0, 255)),
-        layers.RandomContrast(0.3),
+        layers.RandomBrightness(0.15, value_range=(0, 255)),
+        layers.RandomContrast(0.2),
     ], name="augmentation")
 
 
