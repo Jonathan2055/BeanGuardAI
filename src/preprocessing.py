@@ -48,7 +48,7 @@ def make_dataset(paths, labels, shuffle=False):
 
 def build_augmentation():
     """Random changes applied to training images. Only active during training."""
-        return keras.Sequential([
+    return keras.Sequential([
         layers.RandomFlip("horizontal_and_vertical"),
         layers.RandomRotation(0.05),
         layers.RandomZoom(0.1),
