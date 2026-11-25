@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+*.py[cod]
+.env
+.env.*
+data/
+models/
+results/
+notebook/
+tests/
+ui/node_modules/
+ui/dist/

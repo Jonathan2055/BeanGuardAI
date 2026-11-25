@@ -4,3 +4,13 @@ __pycache__/
 venv/
 .venv/
 data/raw_data/
+.env
+.env.*
+!.env.example
+data/app.db*
+data/uploads/
+models/retrain_status.json
+models/candidate*
+ui/node_modules/
+ui/dist/
+results/

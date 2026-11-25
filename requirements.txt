@@ -1,7 +1,16 @@
+# API and model runtime
+fastapi
+uvicorn[standard]
+python-multipart
+tensorflow
+numpy
+pillow
+# Notebook and training analysis
 pandas
 matplotlib
-tensorflow
 scikit-learn
 kagglehub
-pillow
 ipykernel
+
+# Load testing
+locust

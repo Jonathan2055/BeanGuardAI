@@ -1,17 +1,32 @@
 """Fine-tune the saved model using the requesting account's uploaded images."""
 import json
+import logging
 import os
+import threading
 from datetime import datetime
 
 from tensorflow import keras
 
-from src import config, database, ood
+from src import config, database
 from src.model import compile_model, evaluate_model, export_inference_model, unfreeze_top_layers
 from src.preprocessing import list_images, make_dataset
 
 STATUS_PATH = config.MODELS_DIR / "retrain_status.json"
 METRICS_PATH = config.MODELS_DIR / "metrics.json"
 EPOCHS = int(os.getenv("RETRAIN_EPOCHS", "5"))
+HEARTBEAT_INTERVAL = 20
+logger = logging.getLogger(__name__)
+
+
+def _renew_retraining_lease(owner_id, job_id, stop_event):
+    while not stop_event.wait(HEARTBEAT_INTERVAL):
+        try:
+            if not database.renew_retraining(owner_id, job_id):
+                logger.error("Retraining lease was lost for job %s.", job_id)
+                return
+        except Exception:
+            logger.exception("Could not renew retraining lease for job %s.", job_id)
+            return
 
 
 def read_status():
@@ -54,6 +69,13 @@ def run_retraining(owner_id, job_id, epochs=EPOCHS):
         database.finish_retraining(owner_id, job_id, "done")
         return
 
+    stop_heartbeat = threading.Event()
+    heartbeat = threading.Thread(
+        target=_renew_retraining_lease,
+        args=(owner_id, job_id, stop_heartbeat),
+        daemon=True,
+    )
+    heartbeat.start()
     try:
         class_names = config.load_class_names()
         uploads = database.get_all_uploads(owner_id)
@@ -93,20 +115,12 @@ def run_retraining(owner_id, job_id, epochs=EPOCHS):
             config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
             candidate_model = config.MODELS_DIR / "candidate.keras"
             candidate_h5 = config.MODELS_DIR / "candidate.h5"
-            candidate_ood = config.MODELS_DIR / "candidate_ood_stats.json"
 
             model.save(candidate_model)
             export_inference_model(model).save(candidate_h5)
-            ood.build_stats(
-                model,
-                class_names,
-                output_path=candidate_ood,
-                owner_id=owner_id,
-            )
 
             os.replace(candidate_model, config.MODEL_PATH)
             os.replace(candidate_h5, config.MODEL_H5_PATH)
-            os.replace(candidate_ood, ood.STATS_PATH)
 
             current_metrics = read_metrics()
             updated_metrics = dict(new_metrics)
@@ -156,4 +170,6 @@ def run_retraining(owner_id, job_id, epochs=EPOCHS):
         )
         raise
     finally:
+        stop_heartbeat.set()
+        heartbeat.join()
         database.finish_retraining(owner_id, job_id, job_state)

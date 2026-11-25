@@ -130,12 +130,10 @@ function overview() {
         <div class="metric-list">${metricRows.map(([name, value]) => `<div class="metric-line"><span>${name}</span><div class="metric-track"><i style="width:${Math.min(100, Number(value || 0) * 100)}%"></i></div><b>${value == null ? "—" : percent(value)}</b></div>`).join("")}</div>
         <h3 class="subheading">Confusion matrix <span class="muted small">Rows = actual; columns = predicted</span></h3>${matrixTable}
       </section>
-      <section class="panel"><div class="panel-heading"><div><span class="eyebrow">OPERATIONS</span><h2>System status</h2></div><span class="status-dot ${status.model_available && status.input_check_ready ? "good" : "warn"}"></span></div>
+      <section class="panel"><div class="panel-heading"><div><span class="eyebrow">OPERATIONS</span><h2>System status</h2></div><span class="status-dot ${status.model_available ? "good" : "warn"}"></span></div>
         <div class="status-row"><span>Prediction API</span><b class="${status.status === "online" ? "positive" : "negative"}">${status.status === "online" ? "Online" : "Unavailable"}</b></div>
         <div class="status-row"><span>Classifier</span><b>${status.model_available ? "Ready" : "Missing"}</b></div>
-        <div class="status-row"><span>Bean-leaf input check</span><b>${status.input_check_ready ? "Ready" : "Not calibrated"}</b></div>
         <div class="status-row"><span>Retraining</span><b>${escapeHtml(pretty(status.retrain?.state || "idle"))}</b></div>
-        ${!status.input_check_ready ? notice("Run the notebook to create input-check statistics before prediction.", "warning") : ""}
         ${state.user ? `<div class="personal-counts"><span>Pending images <b>${escapeHtml(status.pending_uploads ?? 0)}</b></span><span>Your uploads <b>${escapeHtml(status.total_uploads ?? 0)}</b></span></div>` : '<p class="muted small">Log in to see your upload totals and retraining history.</p>'}
       </section>
     </div>
@@ -145,20 +143,19 @@ function overview() {
 function prediction() {
   const result = state.prediction;
   const output = !result
-    ? '<div class="empty-result"><span>✳</span><h2>Waiting for an image</h2><p class="muted">The model checks that an image looks like a bean leaf before classifying it.</p></div>'
+    ? '<div class="empty-result"><span>✳</span><h2>Waiting for an image</h2><p class="muted">Upload a bean-leaf photo for a meaningful disease prediction.</p></div>'
     : result.error
       ? notice(result.error, "error")
       : `<div class="prediction-label"><span class="result-leaf">✓</span><div><span class="eyebrow">MOST LIKELY CLASS</span><h2>${escapeHtml(pretty(result.class))}</h2></div></div>
          <p class="muted">Confidence: <b>${percent(result.confidence)}</b>${result.uncertain ? " · Try a clearer image." : ""}</p>
          <div class="probability-list">${Object.entries(result.probabilities || {}).map(([name, value]) => `<div><div class="probability-label"><span>${escapeHtml(pretty(name))}</span><b>${percent(value)}</b></div><div class="metric-track"><i style="width:${value * 100}%"></i></div></div>`).join("")}</div>
          <p class="notice warning">For education only; confirm important decisions with an agronomist.</p>`;
-  return `${heading("Inspect a leaf", "Choose one clear bean-leaf photo. Images outside the bean-leaf domain are rejected.")}
+  return `${heading("Inspect a leaf", "Upload a bean-leaf photo only. Other images may receive meaningless predictions.")}
     <div class="content-grid prediction-grid">
-      <section class="panel"><span class="eyebrow">SINGLE IMAGE CLASSIFICATION</span><h2>Upload an image</h2><p class="muted">JPEG or PNG · Maximum 10 MB</p>
-        <label class="upload-zone"><input id="predict-file" type="file" accept="image/jpeg,image/png"><span class="upload-symbol">↑</span><strong id="predict-name">${escapeHtml(state.predictFile?.name || "Choose an image")}</strong><small>Choose a clear, close-up photo with one leaf in focus.</small></label>
+      <section class="panel"><span class="eyebrow">SINGLE IMAGE CLASSIFICATION</span><h2>Upload a bean-leaf photo</h2><p class="muted">Bean-leaf photos only · JPEG or PNG · Maximum 10 MB</p>
+        <label class="upload-zone"><input id="predict-file" type="file" accept="image/jpeg,image/png"><span class="upload-symbol">↑</span><strong id="predict-name">${escapeHtml(state.predictFile?.name || "Choose a bean-leaf photo")}</strong><small>Use a clear, close-up photo with one leaf in focus.</small></label>
         <img id="image-preview" class="image-preview" alt="Selected image preview" ${state.previewUrl ? `src="${state.previewUrl}"` : "hidden"}>
-        <button class="button primary" data-action="predict" ${state.busy || !state.status?.model_available || !state.status?.input_check_ready ? "disabled" : ""}>${state.busy ? "Checking image…" : "Analyze image"}</button>
-        ${!state.status?.input_check_ready ? notice("Input check is not calibrated; run the notebook first.", "warning") : ""}
+        <button class="button primary" data-action="predict" ${state.busy || !state.status?.model_available ? "disabled" : ""}>${state.busy ? "Analyzing image…" : "Analyze image"}</button>
       </section>
       <section class="panel prediction-result"><span class="eyebrow">PREDICTION RESULT</span>${output}</section>
     </div>`;
@@ -222,21 +219,21 @@ function retrain() {
     ? authPanel()
     : `<div class="content-grid retrain-grid">
         <section class="panel"><span class="eyebrow">STEP 01 · CONTRIBUTE DATA</span><h2>Upload labeled images</h2>
-          <p class="muted">Only upload bean-leaf photos with accurate labels. Files are checked before being saved for training.</p>
+          <p class="muted">Upload bean-leaf photos only and choose the correct class. Images are checked for a valid file format, not for bean-leaf content.</p>
           <label>Class for selected images<select id="upload-label">${classes.map((name, index) => `<option value="${escapeHtml(name)}" ${state.uploadLabel ? state.uploadLabel === name ? "selected" : "" : index === 0 ? "selected" : ""}>${escapeHtml(pretty(name))}</option>`).join("")}</select></label>
           <label class="field-label">Multiple images · same class<input id="upload-files" type="file" accept="image/jpeg,image/png" multiple></label>
           <div class="divider"><span>OR</span></div>
           <label class="field-label">One ZIP · one folder per class<input id="upload-zip" type="file" accept=".zip,application/zip"></label>
-          <p class="small muted">ZIP folders: ${escapeHtml(classes.map(pretty).join(", "))}.</p>
+          <p class="small muted">Use bean-leaf photos only. ZIP folders: ${escapeHtml(classes.map(pretty).join(", "))}.</p>
           <p id="upload-selection" class="small muted">${state.zipFile ? escapeHtml(state.zipFile.name) : state.files.length ? `${state.files.length} image(s) selected` : "No files selected."}</p>
           <button class="button primary" data-action="upload" ${state.busy || (!state.zipFile && !state.files.length) ? "disabled" : ""}>${state.busy ? "Saving…" : "Save uploaded data"}</button>
           ${notice(state.message)}
         </section>
         <section class="panel"><span class="eyebrow">STEP 02 · RETRAIN</span><h2>Train from your new examples</h2>
           <div class="queue-number" id="pending-count">${escapeHtml(status.pending_uploads ?? 0)}<span>images waiting in your queue</span></div>
-          <p class="muted">Fine-tuning starts from the saved model and uses the original training set plus your uploads. The test set remains separate. Only a candidate with no lower test accuracy replaces the current model.</p>
+          <p class="muted">Retraining starts only when you choose it. Fine-tuning uses the original training set plus your uploads. The test set remains separate. Only a candidate with no lower test accuracy replaces the current model.</p>
           <button id="retrain-button" class="button primary" data-action="retrain" ${state.busy || !status.pending_uploads || jobState === "running" ? "disabled" : ""}>${jobState === "running" ? "Retraining in progress…" : "Start retraining"}</button>
-          <p class="small muted">Automatic trigger: ${escapeHtml(status.retrain_threshold ?? 30)} pending images. Job state: <b id="job-state">${escapeHtml(pretty(jobState))}</b>.</p>
+          <p class="small muted">Retraining is manual. Job state: <b id="job-state">${escapeHtml(pretty(jobState))}</b>.</p>
         </section>
         <section class="panel history-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR ACCOUNT</span><h2>Your model updates</h2></div></div>${runRows(runs)}</section>
       </div>`;
@@ -303,7 +300,7 @@ async function submitUpload() {
       response = await api("/upload", { method: "POST", body });
     }
     const rejected = response.rejected?.length || response.broken_files || 0;
-    state.message = `Saved ${response.saved} image(s).${rejected ? ` Skipped ${rejected} invalid file(s).` : ""}${response.auto_retrain_triggered ? " Automatic retraining started." : ""}`;
+    state.message = `Saved ${response.saved} image(s).${rejected ? ` Skipped ${rejected} invalid file(s).` : ""}`;
     state.files = [];
     state.zipFile = null;
     await refreshData();

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from src import config
 
 DB_PATH = config.DATA_DIR / "app.db"
-RETRAINING_LEASE = timedelta(hours=2)
+RETRAINING_LEASE = timedelta(minutes=2)
 
 
 @contextmanager
@@ -275,11 +275,30 @@ def finish_retraining(owner_id, job_id, state):
         )
 
 
-def retraining_active():
+def renew_retraining(owner_id, job_id):
     with connect() as db:
+        cursor = db.execute(
+            """UPDATE retrain_jobs SET claimed_at = ?
+               WHERE singleton_id = 1 AND owner_id = ? AND job_id = ? AND state = 'running'""",
+            (now(), owner_id, job_id),
+        )
+    return cursor.rowcount == 1
+
+
+def retraining_active():
+    current_time = datetime.now().astimezone()
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
         row = db.execute(
-            "SELECT claimed_at FROM retrain_jobs WHERE singleton_id = 1 AND state = 'running'"
+            """SELECT job_id, claimed_at FROM retrain_jobs
+               WHERE singleton_id = 1 AND state = 'running'"""
         ).fetchone()
-    if not row:
-        return False
-    return datetime.now().astimezone() - datetime.fromisoformat(row["claimed_at"]) < RETRAINING_LEASE
+        if not row:
+            return False
+        if current_time - datetime.fromisoformat(row["claimed_at"]) >= RETRAINING_LEASE:
+            db.execute(
+                "DELETE FROM retrain_jobs WHERE singleton_id = 1 AND job_id = ?",
+                (row["job_id"],),
+            )
+            return False
+        return True

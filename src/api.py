@@ -14,12 +14,12 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
 
-from src import auth, config, database, ood
+from src import auth, config, database
 from src.preprocessing import IMAGE_EXTENSIONS, validate_image
+from src.prediction import predict_image
 from src.retrain import METRICS_PATH, read_status, run_retraining, write_status
 
 UI_DIST = config.BASE_DIR / "ui"
-RETRAIN_THRESHOLD = int(os.getenv("RETRAIN_THRESHOLD", "30"))
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_BATCH_FILES = 100
 MAX_ZIP_BYTES = 250 * 1024 * 1024
@@ -154,6 +154,10 @@ def status(request: Request):
             metrics = json.load(f)
 
     retrain = read_status()
+    if retrain.get("state") == "running" and not database.retraining_active():
+        message = "Retraining stopped before it finished. Start retraining again."
+        write_status("failed", message, retrain.get("owner_id"), retrain.get("job_id"))
+        retrain = read_status()
     if not user or retrain.get("owner_id") != user["id"]:
         retrain = {
             "state": retrain["state"],
@@ -166,13 +170,11 @@ def status(request: Request):
         "uptime_seconds": int(time.time() - START_TIME),
         "started_at": datetime.fromtimestamp(START_TIME).isoformat(timespec="seconds"),
         "model_available": config.MODEL_PATH.exists(),
-        "input_check_ready": ood.STATS_PATH.exists(),
         "metrics": metrics,
         "classes": config.load_class_names(),
         "retrain": retrain,
         "pending_uploads": database.count_pending(user["id"]) if user else None,
         "total_uploads": database.count_all_uploads(user["id"]) if user else None,
-        "retrain_threshold": RETRAIN_THRESHOLD,
         "recent_runs": database.recent_runs(user["id"]) if user else [],
         "user": user,
     }
@@ -180,24 +182,14 @@ def status(request: Request):
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    """Classify one bean-leaf photo; unsupported files and out-of-domain images are rejected."""
+    """Classify one valid image; users should upload bean-leaf photos for meaningful results."""
     contents = _read_bounded_upload(file, MAX_UPLOAD_BYTES)
     try:
-        result = await run_in_threadpool(ood.analyse, contents)
+        result = await run_in_threadpool(predict_image, contents)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except FileNotFoundError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
-
-    if result.get("rejected"):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "message": result["message"],
-                "similarity": result["similarity"],
-                "threshold": result["threshold"],
-            },
-        )
     return result
 
 
@@ -210,21 +202,12 @@ def store_image(image, label, owner_id):
     database.add_upload(path, label, owner_id)
 
 
-async def validate_bean_leaf(contents):
-    try:
-        result = await run_in_threadpool(ood.analyse, contents)
-    except FileNotFoundError as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
-    if result.get("rejected"):
-        raise ValueError(result["message"])
-
-
 def schedule_retraining(background_tasks, owner_id, message):
     job_id = database.claim_retraining(owner_id)
     if job_id is None:
         return False
     try:
-        write_status("running", message, owner_id)
+        write_status("running", message, owner_id, job_id)
         background_tasks.add_task(run_retraining, owner_id, job_id)
     except Exception:
         database.finish_retraining(owner_id, job_id, "failed")
@@ -232,16 +215,9 @@ def schedule_retraining(background_tasks, owner_id, message):
     return True
 
 
-def start_retraining_if_needed(background_tasks, owner_id):
-    if database.count_pending(owner_id) < RETRAIN_THRESHOLD:
-        return False
-    return schedule_retraining(background_tasks, owner_id, "Automatic retraining started.")
-
-
 @app.post("/upload")
 async def upload(
     request: Request,
-    background_tasks: BackgroundTasks,
     label: str = Form(...),
     files: list[UploadFile] = File(...),
 ):
@@ -260,7 +236,6 @@ async def upload(
             if len(contents) > MAX_UPLOAD_BYTES:
                 raise HTTPException(status_code=413, detail=f"{file.filename} exceeds the 10 MB limit.")
             image = validate_image(contents)
-            await validate_bean_leaf(contents)
             store_image(image, label, user["id"])
             saved += 1
         except ValueError:
@@ -268,12 +243,10 @@ async def upload(
 
     if not saved:
         raise HTTPException(status_code=400, detail="No valid JPEG or PNG images were uploaded.")
-    triggered = start_retraining_if_needed(background_tasks, user["id"])
     return {
         "saved": saved,
         "rejected": rejected,
         "pending_uploads": database.count_pending(user["id"]),
-        "auto_retrain_triggered": triggered,
     }
 
 
@@ -284,7 +257,6 @@ def normalise(name):
 @app.post("/upload-zip")
 async def upload_zip(
     request: Request,
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
 ):
     """Upload a zip organized as one folder per class label."""
@@ -322,7 +294,6 @@ async def upload_zip(
         try:
             contents = archive.read(member)
             image = validate_image(contents)
-            await validate_bean_leaf(contents)
             store_image(image, folder, user["id"])
             per_class[folder] += 1
         except ValueError:
@@ -335,14 +306,12 @@ async def upload_zip(
             detail=f"No usable images found. Zip folders must use these class names: {class_names}.",
         )
 
-    triggered = start_retraining_if_needed(background_tasks, user["id"])
     return {
         "saved": total,
         "per_class": per_class,
         "broken_files": broken,
         "unknown_folders": sorted(unknown_folders),
         "pending_uploads": database.count_pending(user["id"]),
-        "auto_retrain_triggered": triggered,
     }
 
 
