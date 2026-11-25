@@ -90,3 +90,13 @@ def evaluate_model(model, dataset, class_names):
         "confusion_matrix": matrix.tolist(),
         "images": int(len(y_true)),
     }
+
+
+def export_inference_model(trained_model):
+    """The same model WITHOUT the augmentation block (augmentation is only needed while training).
+    Used to create the .h5 file: the RandomBrightness layer cannot be saved in .h5 format."""
+    inputs = keras.Input(shape=trained_model.input_shape[1:])
+    x = inputs
+    for layer in trained_model.layers[2:]:        # skip the InputLayer and the augmentation block
+        x = layer(x)
+    return keras.Model(inputs, x, name="bean_leaf_inference")

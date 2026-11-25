@@ -9,8 +9,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 DATA_DIR = BASE_DIR / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"
-MODELS_DIR = BASE_DIR / "model"  # saved model and evaluation metrics
+MODELS_DIR = BASE_DIR / "models"  # saved model and evaluation metrics
 MODEL_PATH = MODELS_DIR / "bean_model.keras"
+MODEL_H5_PATH = MODELS_DIR / "bean_model.h5"
 
 IMG_SIZE = (224, 224)     # every image is resized to 224 x 224
 BATCH_SIZE = 32           # the model looks at 32 images at a time

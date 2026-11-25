@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bean Leaf Disease Classifier</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root { --green:#2f7d32; --light:#e8f5e9; --bg:#f6f8f6; --text:#1d2b1f; --muted:#5f6f62; --bad:#c62828; --card:#fff; --line:#dbe4dc; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); }
+  header { background:var(--green); color:#fff; padding:14px 20px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
+  header h1 { font-size:1.15rem; margin:0; }
+  .pill { background:rgba(255,255,255,.2); padding:4px 12px; border-radius:99px; font-size:.85rem; }
+  .pill.bad { background:var(--bad); }
+  nav { display:flex; gap:4px; padding:10px 20px 0; flex-wrap:wrap; }
+  nav button { border:0; background:#e0e8e1; padding:9px 16px; border-radius:8px 8px 0 0; cursor:pointer; font-size:.95rem; }
+  nav button.active { background:var(--card); font-weight:600; color:var(--green); }
+  main { max-width:960px; margin:0 auto; padding:0 20px 40px; }
+  section { display:none; background:var(--card); border:1px solid var(--line); border-radius:0 10px 10px 10px; padding:20px; }
+  section.active { display:block; }
+  h2 { margin-top:0; font-size:1.1rem; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; margin-bottom:18px; }
+  .stat { background:var(--light); border-radius:10px; padding:12px; }
+  .stat b { display:block; font-size:1.4rem; }
+  .stat span { color:var(--muted); font-size:.85rem; }
+  button.primary { background:var(--green); color:#fff; border:0; padding:10px 18px; border-radius:8px; cursor:pointer; font-size:.95rem; }
+  button.primary:disabled { opacity:.5; cursor:not-allowed; }
+  select, input[type=file] { padding:8px; margin:6px 0; max-width:100%; }
+  table { border-collapse:collapse; width:100%; font-size:.9rem; margin:8px 0 16px; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:center; }
+  th { background:var(--light); }
+  .result { margin-top:16px; padding:14px; border-radius:10px; background:var(--light); }
+  .result h3 { margin:0 0 6px; font-size:1.3rem; }
+  .bar { background:#cfe3d1; border-radius:6px; height:12px; margin:2px 0 8px; }
+  .bar div { background:var(--green); height:100%; border-radius:6px; }
+  .muted { color:var(--muted); font-size:.9rem; }
+  .error { color:var(--bad); }
+  img#preview { max-width:260px; max-height:260px; border-radius:10px; display:none; margin-top:10px; }
+  .chartbox { max-width:620px; margin:10px 0 4px; }
+  .note { background:#fffde7; border-left:4px solid #f9a825; padding:8px 12px; border-radius:4px; margin:6px 0 22px; font-size:.9rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Bean Guard AI</h1>
+  <span id="uptime" class="pill">connecting…</span>
+</header>
+<nav id="tabs">
+  <button data-tab="predict" class="active">Predict</button>
+  <button data-tab="dashboard">Dashboard</button>
+  <button data-tab="insights">Data insights</button>
+  <button data-tab="retrain">Upload &amp; retrain</button>
+</nav>
+<main>
+
+<section id="predict" class="active">
+  <h2>Predict from one leaf photo</h2>
+  <p class="muted">Upload a photo of a bean leaf. The model says whether it is healthy, has angular leaf spot, or has bean rust.</p>
+  <input type="file" id="predictFile" accept="image/*"><br>
+  <img id="preview" alt="preview">
+  <p><button class="primary" id="predictBtn">Predict</button></p>
+  <div id="predictResult"></div>
+</section>
+
+<section id="dashboard">
+  <h2>Model dashboard</h2>
+  <div class="cards">
+    <div class="stat"><b id="sUptime">–</b><span>API up-time</span></div>
+    <div class="stat"><b id="sVersion">–</b><span>Model version</span></div>
+    <div class="stat"><b id="sAcc">–</b><span>Test accuracy</span></div>
+    <div class="stat"><b id="sPrec">–</b><span>Precision (macro)</span></div>
+    <div class="stat"><b id="sRec">–</b><span>Recall (macro)</span></div>
+    <div class="stat"><b id="sF1">–</b><span>F1 (macro)</span></div>
+  </div>
+  <h3>Confusion matrix (test set)</h3>
+  <p class="muted">Rows = true class, columns = predicted class.</p>
+  <div id="confusion"></div>
+  <h3>Retraining history</h3>
+  <div id="history"></div>
+</section>
+
+<section id="insights">
+  <h2>What the data tells us</h2>
+  <h3>1. Class balance</h3>
+  <div class="chartbox"><canvas id="balanceChart"></canvas></div>
+  <div class="note">Each class has the same number of images, so accuracy is a fair metric and the model cannot score well just by favouring one class.</div>
+  <h3>2. Average colour per class</h3>
+  <div class="chartbox"><canvas id="colourChart"></canvas></div>
+  <div class="note">Healthy leaves have the highest green and blue values. Diseased leaves are less green, and angular leaf spot photos have more red/yellow from the brown lesions and yellowing. Colour helps, but the classes overlap a lot, so the model also needs texture and shape.</div>
+  <h3>3. Per-class F1 score</h3>
+  <div class="chartbox"><canvas id="f1Chart"></canvas></div>
+  <div class="note">This shows which disease the model finds hardest. Classes with lower F1 are the ones most often confused with another class (see the confusion matrix on the dashboard).</div>
+</section>
+
+<section id="retrain">
+  <h2>Upload new data and retrain</h2>
+  <p class="muted">Choose the class of the leaves, select <b>many</b> images of that class, and upload. Retraining starts automatically when <b id="threshold">–</b> new images are waiting, or you can press the button.</p>
+  <label>Class of these images:</label><br>
+  <select id="labelSelect"></select><br>
+  <input type="file" id="uploadFiles" accept="image/*" multiple><br>
+  <p><button class="primary" id="uploadBtn">Upload images</button></p>
+  <div id="uploadResult"></div>
+  <hr>
+  <p>New images waiting for training: <b id="pending">0</b> &nbsp;|&nbsp; Total uploaded: <b id="totalUploads">0</b></p>
+  <p><button class="primary" id="retrainBtn">Retrain model</button></p>
+  <div id="retrainStatus" class="result muted">Retraining status: –</div>
+</section>
+
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const pretty = s => s.replace(/_/g, ' ');
+const pct = v => (v * 100).toFixed(1) + '%';
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || response.statusText);
+  return data;
+}
+function formatUptime(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+}
+
+//  tabs 
+document.querySelectorAll('#tabs button').forEach(btn => btn.onclick = () => {
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
+  btn.classList.add('active');
+  $(btn.dataset.tab).classList.add('active');
+  if (btn.dataset.tab === 'insights') loadInsights();
+});
+
+//  status (refreshes every 5 seconds) 
+let lastStatus = null;
+async function refreshStatus() {
+  try {
+    const s = await api('/status');
+    lastStatus = s;
+    $('uptime').textContent = 'Online · up ' + formatUptime(s.uptime_seconds);
+    $('uptime').className = 'pill';
+    $('sUptime').textContent = formatUptime(s.uptime_seconds);
+    const m = s.metrics;
+    $('sVersion').textContent = m ? 'v' + m.version : 'none';
+    $('sAcc').textContent = m ? pct(m.accuracy) : '–';
+    $('sPrec').textContent = m ? pct(m.precision) : '–';
+    $('sRec').textContent = m ? pct(m.recall) : '–';
+    $('sF1').textContent = m ? pct(m.f1) : '–';
+    $('pending').textContent = s.pending_uploads;
+    $('totalUploads').textContent = s.total_uploads;
+    $('threshold').textContent = s.retrain_threshold;
+    $('retrainBtn').disabled = s.retrain.state === 'running';
+    $('retrainStatus').textContent = 'Retraining status: ' + s.retrain.state + ' — ' + s.retrain.message;
+    if (!$('labelSelect').options.length) {
+      s.classes.forEach(c => $('labelSelect').add(new Option(pretty(c), c)));
+    }
+    drawConfusion(s);
+    drawHistory(s);
+  } catch (e) {
+    $('uptime').textContent = 'Offline';
+    $('uptime').className = 'pill bad';
+  }
+}
+function drawConfusion(s) {
+  if (!s.metrics || !s.metrics.confusion_matrix) return;
+  let html = '<table><tr><th></th>' + s.classes.map(c => `<th>${pretty(c)}</th>`).join('') + '</tr>';
+  s.metrics.confusion_matrix.forEach((row, i) => {
+    html += `<tr><th>${pretty(s.classes[i])}</th>` + row.map(v => `<td>${v}</td>`).join('') + '</tr>';
+  });
+  $('confusion').innerHTML = html + '</table>';
+}
+function drawHistory(s) {
+  if (!s.recent_runs.length) { $('history').innerHTML = '<p class="muted">No retraining runs yet.</p>'; return; }
+  let html = '<table><tr><th>Finished</th><th>New images</th><th>Accuracy before</th><th>Accuracy after</th><th>Result</th></tr>';
+  s.recent_runs.forEach(r => {
+    html += `<tr><td>${r.finished_at || ''}</td><td>${r.new_images}</td>` +
+      `<td>${r.old_accuracy == null ? '–' : pct(r.old_accuracy)}</td><td>${r.new_accuracy == null ? '–' : pct(r.new_accuracy)}</td>` +
+      `<td>${r.promoted ? 'new model kept' : 'old model kept'}</td></tr>`;
+  });
+  $('history').innerHTML = html + '</table>';
+}
+refreshStatus();
+setInterval(refreshStatus, 5000);
+
+//  predict 
+$('predictFile').onchange = () => {
+  const file = $('predictFile').files[0];
+  if (file) { $('preview').src = URL.createObjectURL(file); $('preview').style.display = 'block'; }
+};
+$('predictBtn').onclick = async () => {
+  const file = $('predictFile').files[0];
+  if (!file) { $('predictResult').innerHTML = '<p class="error">Please choose an image first.</p>'; return; }
+  const form = new FormData();
+  form.append('file', file);
+  $('predictResult').innerHTML = '<p class="muted">Predicting…</p>';
+  try {
+    const r = await api('/predict', { method: 'POST', body: form });
+    let html = `<div class="result"><h3>${pretty(r.class)}</h3><p>Confidence: <b>${pct(r.confidence)}</b></p>`;
+    for (const [name, p] of Object.entries(r.probabilities)) {
+      html += `<div>${pretty(name)} — ${pct(p)}</div><div class="bar"><div style="width:${p * 100}%"></div></div>`;
+    }
+    $('predictResult').innerHTML = html + '</div>';
+  } catch (e) {
+    $('predictResult').innerHTML = `<p class="error">${e.message}</p>`;
+  }
+};
+
+//  insights 
+let chartsDrawn = false;
+async function loadInsights() {
+  if (chartsDrawn) return;
+  try {
+    const data = await api('/insights');
+    const names = data.classes.map(pretty);
+    new Chart($('balanceChart'), { type: 'bar', data: { labels: names, datasets: ['train', 'val', 'test'].map(
+      (split, i) => ({ label: split, data: data.classes.map(c => data.counts[split][c]), backgroundColor: ['#2f7d32', '#81c784', '#c8e6c9'][i] })) },
+      options: { plugins: { title: { display: true, text: 'Images per class in each split' } } } });
+    new Chart($('colourChart'), { type: 'bar', data: { labels: names, datasets: ['red', 'green', 'blue'].map(
+      c => ({ label: c, data: data.classes.map(k => (data.colours[k] || {})[c]), backgroundColor: c })) },
+      options: { plugins: { title: { display: true, text: 'Average colour value (0–255)' } } } });
+    const m = lastStatus && lastStatus.metrics;
+    if (m && m.per_class_f1) {
+      new Chart($('f1Chart'), { type: 'bar', data: { labels: names, datasets: [{ label: 'F1 score',
+        data: data.classes.map(c => m.per_class_f1[c]), backgroundColor: '#2f7d32' }] },
+        options: { scales: { y: { min: 0, max: 1 } } } });
+    }
+    chartsDrawn = true;
+  } catch (e) { console.error(e); }
+}
+
+//  upload + retrain 
+$('uploadBtn').onclick = async () => {
+  const files = $('uploadFiles').files;
+  if (!files.length) { $('uploadResult').innerHTML = '<p class="error">Please choose images first.</p>'; return; }
+  const form = new FormData();
+  form.append('label', $('labelSelect').value);
+  for (const f of files) form.append('files', f);
+  $('uploadResult').innerHTML = '<p class="muted">Uploading…</p>';
+  try {
+    const r = await api('/upload', { method: 'POST', body: form });
+    let msg = `Saved ${r.saved} image(s).`;
+    if (r.rejected.length) msg += ` Rejected (not images): ${r.rejected.join(', ')}.`;
+    if (r.auto_retrain_triggered) msg += ' Automatic retraining started!';
+    $('uploadResult').innerHTML = `<p>${msg}</p>`;
+    $('uploadFiles').value = '';
+    refreshStatus();
+  } catch (e) {
+    $('uploadResult').innerHTML = `<p class="error">${e.message}</p>`;
+  }
+};
+$('retrainBtn').onclick = async () => {
+  try {
+    await api('/retrain', { method: 'POST' });
+    $('retrainStatus').textContent = 'Retraining status: running — started …';
+    $('retrainBtn').disabled = true;
+    refreshStatus();
+  } catch (e) {
+    $('retrainStatus').innerHTML = `<span class="error">${e.message}</span>`;
+  }
+};
+</script>
+</body>
+</html>
