@@ -3,15 +3,14 @@ import json
 from pathlib import Path
 
 # Project root = the folder that contains src/
-# BASE_DIR is detected from this file, so it works on Kaggle and your laptop.
-# Make sure PROJECT_ROOT points to your local BeanGuardAI folder when using a laptop.
+# BASE_DIR is detected from this file, so it works on Kaggle, on your laptop and in Docker.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 DATA_DIR = BASE_DIR / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"
-MODELS_DIR = BASE_DIR / "models"  # saved model and evaluation metrics
-MODEL_PATH = MODELS_DIR / "bean_model.keras"
-MODEL_H5_PATH = MODELS_DIR / "bean_model.h5"
+MODELS_DIR = BASE_DIR / "models"                     # saved models and evaluation metrics
+MODEL_PATH = MODELS_DIR / "bean_model.keras"         # full model: used by the API and for retraining
+MODEL_H5_PATH = MODELS_DIR / "bean_model.h5"         # inference-only copy (no augmentation)
 
 IMG_SIZE = (224, 224)     # every image is resized to 224 x 224
 BATCH_SIZE = 32           # the model looks at 32 images at a time
