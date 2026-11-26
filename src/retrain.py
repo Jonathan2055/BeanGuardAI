@@ -9,6 +9,7 @@ from tensorflow import keras
 
 from src import config, database
 from src.model import compile_model, evaluate_model, export_inference_model, unfreeze_top_layers
+from src import model_versions
 from src.preprocessing import list_images, make_dataset
 
 STATUS_PATH = config.MODELS_DIR / "retrain_status.json"
@@ -119,10 +120,12 @@ def run_retraining(owner_id, job_id, epochs=EPOCHS):
             model.save(candidate_model)
             export_inference_model(model).save(candidate_h5)
 
+            model_versions.set_active_version(model_versions.CURRENT)
+            current_metrics = model_versions.preserve_current_version()
+
             os.replace(candidate_model, config.MODEL_PATH)
             os.replace(candidate_h5, config.MODEL_H5_PATH)
 
-            current_metrics = read_metrics()
             updated_metrics = dict(new_metrics)
             updated_metrics["baseline_accuracy"] = current_metrics.get("baseline_accuracy")
             updated_metrics["version"] = current_metrics.get("version", 1) + 1

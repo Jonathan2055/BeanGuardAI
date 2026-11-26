@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
 
-from src import auth, config, database
+from src import auth, config, database, model_versions
 from src.preprocessing import IMAGE_EXTENSIONS, validate_image
 from src.prediction import predict_image
 from src.retrain import METRICS_PATH, read_status, run_retraining, write_status
@@ -40,6 +40,10 @@ class RegisterPayload(BaseModel):
 class LoginPayload(BaseModel):
     email: str
     password: str
+
+
+class ModelVersionPayload(BaseModel):
+    version: str
 
 
 def _set_session(response, token):
@@ -165,12 +169,16 @@ def status(request: Request):
             "updated_at": retrain.get("updated_at"),
         }
 
+    active_version = model_versions.get_active_version()
+    versions = model_versions.available_versions()
     return {
         "status": "online",
         "uptime_seconds": int(time.time() - START_TIME),
         "started_at": datetime.fromtimestamp(START_TIME).isoformat(timespec="seconds"),
-        "model_available": config.MODEL_PATH.exists(),
-        "metrics": metrics,
+        "model_available": model_versions.model_path(active_version).exists(),
+        "active_model": active_version,
+        "model_versions": versions,
+        "metrics": model_versions.read_metrics(active_version) if versions else metrics,
         "classes": config.load_class_names(),
         "retrain": retrain,
         "pending_uploads": database.count_pending(user["id"]) if user else None,
@@ -178,6 +186,19 @@ def status(request: Request):
         "recent_runs": database.recent_runs(user["id"]) if user else [],
         "user": user,
     }
+
+
+@app.post("/model-version")
+def select_model_version(payload: ModelVersionPayload, request: Request):
+    """Select the model used by predictions for all signed-in users."""
+    _required_user(request)
+    try:
+        model_versions.set_active_version(payload.version)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return {"active_model": payload.version}
 
 
 @app.post("/predict")

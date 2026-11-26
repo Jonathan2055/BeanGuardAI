@@ -66,9 +66,10 @@ function updateHeader() {
     ? `<span class="account-chip"><span class="avatar">${escapeHtml(state.user.display_name?.slice(0, 1).toUpperCase())}</span><span class="account-name">${escapeHtml(state.user.display_name)}</span><button class="text-button signout" data-action="logout">Sign out</button></span>`
     : `<button class="button outline compact" data-action="login">Log in</button>`;
   const classes = state.status?.classes || [];
+  const activeVersion = state.status?.active_model || "current";
   document.querySelector("#model-label").innerHTML = `
     <span class="eyebrow">MODEL</span>
-    <strong>${state.status?.model_available ? `BeanGuard v${escapeHtml(state.status.metrics?.version || 1)}` : "Model unavailable"}</strong>
+    <strong>${state.status?.model_available ? `BeanGuard v${escapeHtml(state.status.metrics?.version || 1)} · ${escapeHtml(activeVersion)}` : "Model unavailable"}</strong>
     <span class="muted small">${escapeHtml(classes.map(pretty).join(" · ") || "Waiting for model metadata")}</span>`;
 }
 
@@ -108,6 +109,8 @@ function runRows(runs) {
 function overview() {
   const status = state.status || {};
   const metrics = status.metrics || {};
+  const modelVersions = status.model_versions || [];
+  const activeVersion = status.active_model || "current";
   const classes = status.classes || [];
   const history = status.recent_runs || [];
   const matrix = metrics.confusion_matrix;
@@ -119,6 +122,13 @@ function overview() {
   const metricRows = [["Accuracy", metrics.accuracy], ["Precision · macro", metrics.precision], ["Recall · macro", metrics.recall], ["F1 score · macro", metrics.f1]];
   return `${heading("Model overview", "Monitor availability, evaluation results and your account's retraining activity.", '<button class="button primary" data-tab="predict">New prediction</button>')}
     ${notice(state.message)}
+    <section class="panel model-version-panel">
+      <div class="panel-heading"><div><span class="eyebrow">PREDICTION MODEL</span><h2>Choose a version</h2></div><span class="tag">${escapeHtml(activeVersion.toUpperCase())} ACTIVE</span></div>
+      <p class="muted">Switching changes the model used for predictions for everyone. Retraining still starts from the current best model.</p>
+      ${modelVersions.length ? `<label>Available version<select id="model-version" ${!state.user || modelVersions.length < 2 ? "disabled" : ""}>${modelVersions.map((version) => `<option value="${escapeHtml(version.id)}" ${version.id === activeVersion ? "selected" : ""}>${escapeHtml(version.id === "current" ? "Current" : "Previous")} · v${escapeHtml(version.metrics?.version || 1)} · ${version.metrics?.accuracy == null ? "accuracy unavailable" : percent(version.metrics.accuracy)}</option>`).join("")}</select></label>` : '<p class="muted">No saved model versions are available.</p>'}
+      <button class="button outline compact" data-action="switch-model" ${!state.user || modelVersions.length < 2 ? "disabled" : ""}>Use selected version</button>
+      ${!state.user ? '<p class="small muted">Log in to switch model versions.</p>' : ""}
+    </section>
     <div class="stats-grid">
       <article class="stat-card"><span class="eyebrow">SERVICE UPTIME</span><strong>${uptime(status.uptime_seconds)}</strong><span class="muted small">Since this API process started</span></article>
       <article class="stat-card"><span class="eyebrow">MODEL VERSION</span><strong>${metrics.version ? `v${escapeHtml(metrics.version)}` : "—"}</strong><span class="muted small">${escapeHtml(metrics.trained_at || "Training date unavailable")}</span></article>
@@ -328,6 +338,27 @@ async function startRetraining() {
   }
 }
 
+async function switchModelVersion() {
+  const version = document.querySelector("#model-version")?.value;
+  if (!version) return;
+  state.busy = true;
+  state.message = "";
+  render();
+  try {
+    const result = await api("/model-version", {
+      method: "POST",
+      body: JSON.stringify({ version }),
+    });
+    state.message = `Predictions now use the ${result.active_model} model.`;
+    await refreshData();
+  } catch (error) {
+    state.message = error.message;
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
 document.addEventListener("click", async (event) => {
   const tabButton = event.target.closest("[data-tab]");
   if (tabButton) {
@@ -355,6 +386,9 @@ document.addEventListener("click", async (event) => {
       break;
     case "retrain":
       await startRetraining();
+      break;
+    case "switch-model":
+      await switchModelVersion();
       break;
     case "logout":
       try {

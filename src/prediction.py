@@ -5,26 +5,29 @@ import threading
 import numpy as np
 from tensorflow import keras
 
-from src.config import MODEL_PATH, load_class_names
+from src.config import load_class_names
+from src.model_versions import get_active_version, model_path
 from src.preprocessing import image_to_array, validate_image
 
-_model = None
-_model_time = None
+_models = {}
 _lock = threading.Lock()
 
 
 def get_model():
-    """Load the model once. If the file changes (after retraining), load the new one."""
-    global _model, _model_time
-    if not MODEL_PATH.exists():
+    """Load the selected model once, refreshing it when its file changes."""
+    version = get_active_version()
+    path = model_path(version)
+    if not path.exists():
         raise FileNotFoundError("Model not found. Train and save it first (run the notebook).")
-    modified = os.path.getmtime(MODEL_PATH)
-    if _model is None or modified != _model_time:
+    modified = os.stat(path).st_mtime_ns
+    cached = _models.get(version)
+    if cached is None or cached[0] != modified:
         with _lock:
-            if _model is None or modified != _model_time:
-                _model = keras.models.load_model(MODEL_PATH, compile=False)
-                _model_time = modified
-    return _model
+            cached = _models.get(version)
+            if cached is None or cached[0] != modified:
+                cached = (modified, keras.models.load_model(path, compile=False))
+                _models[version] = cached
+    return cached[1]
 
 
 def predict_image(file_bytes):
