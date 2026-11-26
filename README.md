@@ -3,7 +3,7 @@
 Screen a photo of a bean leaf for **angular leaf spot**, **bean rust**, or a **healthy** leaf. A MobileNetV2 model (transfer learning) is served by a FastAPI app with a web dashboard, where logged-in users can upload labelled photos and retrain the model.
 
 Live app : <http://51.20.10.95/> . [API docs (Swagger)](http://51.20.10.95/docs) 
-Demo video : TODO: YouTube link 
+Demo video : [YouTube link](https://youtu.be/sbu2-QBdUBs) 
 Dataset : [Bean Disease Dataset on Kaggle](https://www.kaggle.com/datasets/therealoise/bean-disease-dataset) 
 Notebook : [notebook/bean_guard_notebook.ipynb](notebook/bean_guard_notebook.ipynb) 
 
@@ -90,7 +90,7 @@ Open <http://localhost:8080>. `data/` and `models/` are bind-mounted, so the dat
 
 ## Deployment (AWS)
 
-Deployed on an AWS EC2 instance (TODO: region and instance type) with Docker Compose and HTTPS.
+Deployed on an AWS EC2 instance with Docker Compose and HTTPS.
 
 1. Launch an Ubuntu instance with at least 4 GB RAM. Allow inbound TCP 22 (your IP only), 80 and 443.
 2. Install Docker Engine and the Compose plugin, then clone this repository.
@@ -111,11 +111,13 @@ locust -f locustfile.py --headless -u 20 -r 4 -t 2m \
 
 | API containers | Users | Requests | Failures | Median (ms) | p95 (ms) | Requests/s |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1 | 20 | TODO | TODO | TODO | TODO | TODO |
-| 2 | 20 | TODO | TODO | TODO | TODO | TODO |
-| 3 | 20 | TODO | TODO | TODO | TODO | TODO |
+| 1 | 20 | 1,269 | 1,269 | 780 | 1,200 | 20.29 |
+| 2 | 20 | 80 | 0 | 2,000 | 3,500 | 6.52 |
+| 3 | 20 | 0 | 0 | - | - | 0.00 |
 
-TODO: two or three sentences on how latency and throughput changed. Containers on one machine share its CPU, so more containers do not always mean proportionally faster responses.
+The one-container run completed 1,269 requests but every request was counted as a failure: 1,268 responses were not valid JSON and one returned HTTP 500. The two-container run had no failures, but it measured 2,000 ms median and 3,500 ms p95 latency, versus 780 ms median and 1,200 ms p95 for the earlier run. Its throughput was 6.52 requests/s, lower than 20.29 requests/s in the earlier run. The three-container run produced no completed requests and therefore has no valid performance measurement.
+
+These runs do not establish a reliable container-scaling comparison because they used different application states and the one-container run recorded response failures. Containers on one machine also share CPU and memory, so adding containers does not always improve latency or throughput proportionally.
 
 ## Limitations
 
