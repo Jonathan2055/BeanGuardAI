@@ -14,5 +14,4 @@ models/candidate*
 models/versions/
 ui/node_modules/
 ui/dist/
-results/
 tests/

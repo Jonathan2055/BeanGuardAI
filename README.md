@@ -95,4 +95,12 @@ mkdir -p results
 
 The workload uses a held-out image from `data/test/healthy`. The API is intended to run as one container with SQLite/local-file storage. Existing multi-container measurements were inconsistent and do not support a reliable scaling comparison.
 
+Locust was used to send repeated `/predict` requests with 20 concurrent users and a 0.05–0.2 second wait time between tasks, exercising model inference against a held-out bean-leaf image.
+
+| Test run | Requests | Failures | Median (ms) | Average (ms) | 95th percentile (ms) | Throughput (req/s) | Max (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `containers_1` | 712 | 0 | 2,600 | 3,091 | 6,700 | 5.99 | 12,849 |
+| `containers_2` | 270 | 0 | 2,000 | 2,772 | 6,700 | 6.09 | 7,552 |
+| `containers_3` | 534 | 0 | 3,000 | 3,652 | 7,100 | 5.11 | 20,178 |
+
 To retrain from scratch, open `notebook/bean_guard_notebook.ipynb`, attach the Bean Disease Dataset, and run all cells.
