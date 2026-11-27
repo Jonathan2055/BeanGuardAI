@@ -7,9 +7,11 @@ const state = {
   prediction: null,
   predictFile: null,
   previewUrl: null,
+  previewError: "",
   files: [],
   zipFile: null,
   uploadLabel: "",
+  retrainEpochs: null,
   busy: false,
   message: "",
 };
@@ -66,10 +68,10 @@ function updateHeader() {
     ? `<span class="account-chip"><span class="avatar">${escapeHtml(state.user.display_name?.slice(0, 1).toUpperCase())}</span><span class="account-name">${escapeHtml(state.user.display_name)}</span><button class="text-button signout" data-action="logout">Sign out</button></span>`
     : `<button class="button outline compact" data-action="login">Log in</button>`;
   const classes = state.status?.classes || [];
-  const activeVersion = state.status?.active_model || "current";
+  const activeVersion = state.status?.active_model || "v1";
   document.querySelector("#model-label").innerHTML = `
     <span class="eyebrow">MODEL</span>
-    <strong>${state.status?.model_available ? `BeanGuard v${escapeHtml(state.status.metrics?.version || 1)} · ${escapeHtml(activeVersion)}` : "Model unavailable"}</strong>
+    <strong>${state.status?.model_available ? `BeanGuard ${escapeHtml(activeVersion)}` : "Model unavailable"}</strong>
     <span class="muted small">${escapeHtml(classes.map(pretty).join(" · ") || "Waiting for model metadata")}</span>`;
 }
 
@@ -94,14 +96,14 @@ function barRows(items, max, format = (value) => value, color = "green") {
 function runRows(runs) {
   if (!state.user) return '<p class="muted">Log in to view your own retraining history.</p>';
   if (!runs.length) return '<p class="muted">No retraining runs for this account yet.</p>';
-  return `<div class="table-scroll"><table><thead><tr><th>Finished</th><th>Images</th><th>Accuracy before</th><th>Accuracy after</th><th>F1 after</th><th>Outcome</th></tr></thead><tbody>
+  return `<div class="table-scroll"><table><thead><tr><th>Finished</th><th>Images</th><th>Validation before</th><th>Validation after</th><th>F1 after</th><th>Outcome</th></tr></thead><tbody>
     ${runs.map((run) => `<tr>
       <td>${escapeHtml(run.finished_at || "In progress")}</td>
       <td>${escapeHtml(run.new_images)}</td>
       <td>${run.old_accuracy == null ? "—" : percent(run.old_accuracy)}</td>
       <td>${run.new_accuracy == null ? "—" : percent(run.new_accuracy)}</td>
       <td>${run.new_metrics?.f1 == null ? "—" : percent(run.new_metrics.f1)}</td>
-      <td><span class="tag ${run.promoted ? "success-tag" : ""}">${run.promoted ? "MODEL PROMOTED" : "BASELINE KEPT"}</span></td>
+      <td><span class="tag ${run.promoted ? "success-tag" : ""}">${run.promoted ? "MODEL PROMOTED" : "BASELINE KEPT"}</span><small>${escapeHtml(run.message || "")}</small></td>
     </tr>`).join("")}
     </tbody></table></div>`;
 }
@@ -110,7 +112,8 @@ function overview() {
   const status = state.status || {};
   const metrics = status.metrics || {};
   const modelVersions = status.model_versions || [];
-  const activeVersion = status.active_model || "current";
+  const activeVersion = status.active_model || "v1";
+  const evaluationSplit = metrics.evaluation_split || "test";
   const classes = status.classes || [];
   const history = status.recent_runs || [];
   const matrix = metrics.confusion_matrix;
@@ -124,19 +127,19 @@ function overview() {
     ${notice(state.message)}
     <section class="panel model-version-panel">
       <div class="panel-heading"><div><span class="eyebrow">PREDICTION MODEL</span><h2>Choose a version</h2></div><span class="tag">${escapeHtml(activeVersion.toUpperCase())} ACTIVE</span></div>
-      <p class="muted">Switching changes the model used for predictions for everyone. Retraining still starts from the current best model.</p>
-      ${modelVersions.length ? `<label>Available version<select id="model-version" ${!state.user || modelVersions.length < 2 ? "disabled" : ""}>${modelVersions.map((version) => `<option value="${escapeHtml(version.id)}" ${version.id === activeVersion ? "selected" : ""}>${escapeHtml(version.id === "current" ? "Current" : "Previous")} · v${escapeHtml(version.metrics?.version || 1)} · ${version.metrics?.accuracy == null ? "accuracy unavailable" : percent(version.metrics.accuracy)}</option>`).join("")}</select></label>` : '<p class="muted">No saved model versions are available.</p>'}
+      <p class="muted">Your selection only changes predictions for your account. Retraining starts from your selected version; promoted versions are available to everyone but do not change other accounts' selections.</p>
+      ${modelVersions.length ? `<label>Available version<select id="model-version" ${!state.user || modelVersions.length < 2 ? "disabled" : ""}>${modelVersions.map((version) => `<option value="${escapeHtml(version.id)}" ${version.id === activeVersion ? "selected" : ""}>${escapeHtml(version.id.toUpperCase())} · ${escapeHtml(version.metrics?.evaluation_split || "test")} accuracy ${version.metrics?.accuracy == null ? "unavailable" : percent(version.metrics.accuracy)}</option>`).join("")}</select></label>` : '<p class="muted">No saved model versions are available.</p>'}
       <button class="button outline compact" data-action="switch-model" ${!state.user || modelVersions.length < 2 ? "disabled" : ""}>Use selected version</button>
       ${!state.user ? '<p class="small muted">Log in to switch model versions.</p>' : ""}
     </section>
     <div class="stats-grid">
       <article class="stat-card"><span class="eyebrow">SERVICE UPTIME</span><strong>${uptime(status.uptime_seconds)}</strong><span class="muted small">Since this API process started</span></article>
-      <article class="stat-card"><span class="eyebrow">MODEL VERSION</span><strong>${metrics.version ? `v${escapeHtml(metrics.version)}` : "—"}</strong><span class="muted small">${escapeHtml(metrics.trained_at || "Training date unavailable")}</span></article>
-      <article class="stat-card"><span class="eyebrow">TEST ACCURACY</span><strong>${metrics.accuracy == null ? "—" : percent(metrics.accuracy)}</strong><span class="muted small">${escapeHtml(metrics.images || 0)} held-out images</span></article>
+      <article class="stat-card"><span class="eyebrow">MODEL VERSION</span><strong>${escapeHtml(activeVersion.toUpperCase())}</strong><span class="muted small">${escapeHtml(metrics.trained_at || "Training date unavailable")}</span></article>
+      <article class="stat-card"><span class="eyebrow">${escapeHtml(evaluationSplit.toUpperCase())} ACCURACY</span><strong>${metrics.accuracy == null ? "—" : percent(metrics.accuracy)}</strong><span class="muted small">${escapeHtml(metrics.images || 0)} evaluation images</span></article>
       <article class="stat-card"><span class="eyebrow">MACRO F1</span><strong>${metrics.f1 == null ? "—" : percent(metrics.f1)}</strong><span class="muted small">Average across classes</span></article>
     </div>
     <div class="content-grid">
-      <section class="panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">EVALUATION</span><h2>Model quality</h2></div><span class="tag">HELD-OUT TEST SET</span></div>
+      <section class="panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">EVALUATION</span><h2>Model quality</h2></div><span class="tag">${escapeHtml(evaluationSplit.toUpperCase())} SET</span></div>
         <div class="metric-list">${metricRows.map(([name, value]) => `<div class="metric-line"><span>${name}</span><div class="metric-track"><i style="width:${Math.min(100, Number(value || 0) * 100)}%"></i></div><b>${value == null ? "—" : percent(value)}</b></div>`).join("")}</div>
         <h3 class="subheading">Confusion matrix <span class="muted small">Rows = actual; columns = predicted</span></h3>${matrixTable}
       </section>
@@ -157,7 +160,7 @@ function prediction() {
     : result.error
       ? notice(result.error, "error")
       : `<div class="prediction-label"><span class="result-leaf">✓</span><div><span class="eyebrow">MOST LIKELY CLASS</span><h2>${escapeHtml(pretty(result.class))}</h2></div></div>
-         <p class="muted">Confidence: <b>${percent(result.confidence)}</b>${result.uncertain ? " · Try a clearer image." : ""}</p>
+         <p class="muted">Confidence: <b>${percent(result.confidence)}</b> · Model ${escapeHtml(result.model_version || "")}${result.uncertain ? " · Try a clearer image." : ""}</p>
          <div class="probability-list">${Object.entries(result.probabilities || {}).map(([name, value]) => `<div><div class="probability-label"><span>${escapeHtml(pretty(name))}</span><b>${percent(value)}</b></div><div class="metric-track"><i style="width:${value * 100}%"></i></div></div>`).join("")}</div>
          <p class="notice warning">For education only; confirm important decisions with an agronomist.</p>`;
   return `${heading("Inspect a leaf", "Upload a bean-leaf photo only. Other images may receive meaningless predictions.")}
@@ -165,6 +168,7 @@ function prediction() {
       <section class="panel"><span class="eyebrow">SINGLE IMAGE CLASSIFICATION</span><h2>Upload a bean-leaf photo</h2><p class="muted">Bean-leaf photos only · JPEG or PNG · Maximum 10 MB</p>
         <label class="upload-zone"><input id="predict-file" type="file" accept="image/jpeg,image/png"><span class="upload-symbol">↑</span><strong id="predict-name">${escapeHtml(state.predictFile?.name || "Choose a bean-leaf photo")}</strong><small>Use a clear, close-up photo with one leaf in focus.</small></label>
         <img id="image-preview" class="image-preview" alt="Selected image preview" ${state.previewUrl ? `src="${state.previewUrl}"` : "hidden"}>
+        ${notice(state.previewError, "error")}
         <button class="button primary" data-action="predict" ${state.busy || !state.status?.model_available ? "disabled" : ""}>${state.busy ? "Analyzing image…" : "Analyze image"}</button>
       </section>
       <section class="panel prediction-result"><span class="eyebrow">PREDICTION RESULT</span>${output}</section>
@@ -225,6 +229,13 @@ function retrain() {
   const classes = status.classes || [];
   const runs = status.recent_runs || [];
   const jobState = status.retrain?.state || "idle";
+  const defaults = status.retrain_defaults || { epochs: 5, max_epochs: 20 };
+  const selectedEpochs = state.retrainEpochs ?? defaults.epochs;
+  const progress = status.retrain || {};
+  const epochProgress = progress.epochs
+    ? Math.round((Number(progress.epoch || 0) / progress.epochs) * 100)
+    : 0;
+  const progressLogs = progress.logs || {};
   const content = !state.user
     ? authPanel()
     : `<div class="content-grid retrain-grid">
@@ -234,18 +245,29 @@ function retrain() {
           <label class="field-label">Multiple images · same class<input id="upload-files" type="file" accept="image/jpeg,image/png" multiple></label>
           <div class="divider"><span>OR</span></div>
           <label class="field-label">One ZIP · one folder per class<input id="upload-zip" type="file" accept=".zip,application/zip"></label>
-          <p class="small muted">Use bean-leaf photos only. ZIP folders: ${escapeHtml(classes.map(pretty).join(", "))}.</p>
+          <p class="small muted">Use bean-leaf photos only. ZIP folders: ${escapeHtml(classes.map(pretty).join(", "))}. Limits: 500 MB ZIP, 800 MB unpacked, 3,000 files, and 10 MB per image.</p>
           <p id="upload-selection" class="small muted">${state.zipFile ? escapeHtml(state.zipFile.name) : state.files.length ? `${state.files.length} image(s) selected` : "No files selected."}</p>
           <button class="button primary" data-action="upload" ${state.busy || (!state.zipFile && !state.files.length) ? "disabled" : ""}>${state.busy ? "Saving…" : "Save uploaded data"}</button>
           ${notice(state.message)}
         </section>
         <section class="panel"><span class="eyebrow">STEP 02 · RETRAIN</span><h2>Train from your new examples</h2>
           <div class="queue-number" id="pending-count">${escapeHtml(status.pending_uploads ?? 0)}<span>images waiting in your queue</span></div>
-          <p class="muted">Retraining starts only when you choose it. Fine-tuning uses the original training set plus your uploads. The test set remains separate. Only a candidate with no lower test accuracy replaces the current model.</p>
+          <p class="muted">Saved images wait in your queue until you start retraining. Fine-tuning uses the original training set plus your uploads, starting from your selected model. A candidate is promoted only if its validation accuracy improves. The held-out test set is not used to select versions.</p>
+          <label for="retrain-epochs">Training epochs <input id="retrain-epochs" type="number" min="1" max="${defaults.max_epochs}" step="1" value="${escapeHtml(selectedEpochs)}" ${jobState === "running" || state.busy ? "disabled" : ""}></label>
+          <p class="small muted">Default: ${defaults.epochs}. Choose from 1 to ${defaults.max_epochs}; early stopping may finish sooner. Learning rate and fine-tuning settings stay at safe defaults.</p>
           <button id="retrain-button" class="button primary" data-action="retrain" ${state.busy || !status.pending_uploads || jobState === "running" ? "disabled" : ""}>${jobState === "running" ? "Retraining in progress…" : "Start retraining"}</button>
           <p class="small muted">Retraining is manual. Job state: <b id="job-state">${escapeHtml(pretty(jobState))}</b>.</p>
+          <div id="retrain-progress" ${jobState === "running" ? "" : "hidden"}>
+            <div class="progress-label">
+              <div class="progress-stage"><span>Epoch</span><strong id="progress-stage">${escapeHtml(progress.stage === "training" ? `${progress.epoch} of ${progress.epochs}` : progress.message || "Preparing…")}</strong></div>
+              <div class="progress-completion"><strong id="progress-percent">${epochProgress}%</strong><span>complete</span></div>
+            </div>
+            <div class="progress-track" role="progressbar" aria-label="Retraining epoch progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${epochProgress}"><i id="progress-fill" style="width:${epochProgress}%"></i></div>
+            <p id="progress-metrics" class="small muted">${Object.entries(progressLogs).map(([name, value]) => `${pretty(name)} ${value}`).join(" · ")}</p>
+          </div>
+          <div id="retrain-message" class="notice ${jobState === "failed" ? "error" : ""}" role="status" ${status.retrain?.message && jobState !== "running" ? "" : "hidden"}>${escapeHtml(status.retrain?.message || "")}</div>
         </section>
-        <section class="panel history-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR ACCOUNT</span><h2>Your model updates</h2></div></div>${runRows(runs)}</section>
+        <section class="panel history-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR ACCOUNT</span><h2>Your model updates</h2></div></div><div id="run-history">${runRows(runs)}</div></section>
       </div>`;
   return `${heading(state.user ? "Improve the model" : "Account access", state.user ? "Upload examples and trigger a private retraining run." : "Log in or register to upload training data.")}${content}`;
 }
@@ -261,6 +283,16 @@ function render() {
     retrain,
   };
   page.innerHTML = views[state.tab]();
+  const preview = page.querySelector("#image-preview");
+  if (preview) {
+    preview.addEventListener("error", () => {
+      if (!state.previewUrl) return;
+      URL.revokeObjectURL(state.previewUrl);
+      state.previewUrl = null;
+      state.previewError = "This file could not be previewed as an image. Choose a valid JPEG or PNG.";
+      render();
+    }, { once: true });
+  }
   updateHeader();
 }
 
@@ -309,8 +341,26 @@ async function submitUpload() {
       state.files.forEach((file) => body.append("files", file));
       response = await api("/upload", { method: "POST", body });
     }
-    const rejected = response.rejected?.length || response.broken_files || 0;
-    state.message = `Saved ${response.saved} image(s).${rejected ? ` Skipped ${rejected} invalid file(s).` : ""}`;
+    const details = [`Saved ${response.saved} image(s).`];
+    if (response.pending_uploads != null) {
+      details.push(`${response.pending_uploads} image(s) are now waiting for retraining.`);
+    }
+    if (response.per_class) {
+      const byClass = Object.entries(response.per_class)
+        .filter(([, count]) => count)
+        .map(([name, count]) => `${pretty(name)}: ${count}`);
+      if (byClass.length) details.push(`By class: ${byClass.join(", ")}.`);
+    }
+    if (response.rejected?.length) {
+      details.push(`Rejected invalid images: ${response.rejected.join(", ")}.`);
+    }
+    if (response.broken_files) {
+      details.push(`Skipped ${response.broken_files} unreadable or oversized image(s).`);
+    }
+    if (response.unknown_folders?.length) {
+      details.push(`Ignored unrecognized ZIP folders: ${response.unknown_folders.join(", ")}.`);
+    }
+    state.message = details.join(" ");
     state.files = [];
     state.zipFile = null;
     await refreshData();
@@ -323,11 +373,21 @@ async function submitUpload() {
 }
 
 async function startRetraining() {
+  const epochs = Number(document.querySelector("#retrain-epochs")?.value);
+  if (!Number.isInteger(epochs) || epochs < 1 || epochs > (state.status?.retrain_defaults?.max_epochs || 20)) {
+    state.message = `Choose a whole number of epochs between 1 and ${state.status?.retrain_defaults?.max_epochs || 20}.`;
+    render();
+    return;
+  }
+  state.retrainEpochs = epochs;
   state.busy = true;
   state.message = "";
   render();
   try {
-    const result = await api("/retrain", { method: "POST" });
+    const result = await api("/retrain", {
+      method: "POST",
+      body: JSON.stringify({ epochs }),
+    });
     state.message = result.message;
     await refreshData();
   } catch (error) {
@@ -412,6 +472,7 @@ document.addEventListener("change", (event) => {
     if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
     state.predictFile = target.files?.[0] || null;
     state.prediction = null;
+    state.previewError = "";
     state.previewUrl = state.predictFile ? URL.createObjectURL(state.predictFile) : null;
     document.querySelector("#predict-name").textContent = state.predictFile?.name || "Choose an image";
     const preview = document.querySelector("#image-preview");
@@ -438,6 +499,8 @@ document.addEventListener("change", (event) => {
     document.querySelector('[data-action="upload"]').disabled = !state.zipFile;
   } else if (target.id === "upload-label") {
     state.uploadLabel = target.value;
+  } else if (target.id === "retrain-epochs") {
+    state.retrainEpochs = Number(target.value);
   }
 });
 
@@ -474,9 +537,43 @@ document.addEventListener("DOMContentLoaded", async () => {
         count.innerHTML = `${escapeHtml(state.status?.pending_uploads ?? 0)}<span>images waiting in your queue</span>`;
         const jobState = state.status?.retrain?.state || "idle";
         document.querySelector("#job-state").textContent = pretty(jobState);
+        const retrainMessage = document.querySelector("#retrain-message");
+        if (retrainMessage) {
+          const message = state.status?.retrain?.message || "";
+          retrainMessage.textContent = message;
+          retrainMessage.hidden = !message || jobState === "running";
+          retrainMessage.classList.toggle("error", jobState === "failed");
+        }
+        const runHistory = document.querySelector("#run-history");
+        if (runHistory) {
+          runHistory.innerHTML = runRows(state.status?.recent_runs || []);
+        }
+        const progress = state.status?.retrain || {};
+        const progressPanel = document.querySelector("#retrain-progress");
+        if (progressPanel) {
+          progressPanel.hidden = jobState !== "running";
+          const completedEpochs = Number(progress.epoch || 0);
+          const totalEpochs = Number(progress.epochs || 0);
+          const progressPercent = totalEpochs
+            ? Math.round((completedEpochs / totalEpochs) * 100)
+            : 0;
+          const stage = document.querySelector("#progress-stage");
+          stage.textContent = progress.stage === "training"
+            ? `${completedEpochs} of ${totalEpochs}`
+            : pretty(progress.stage || "preparing");
+          document.querySelector("#progress-percent").textContent = `${progressPercent}%`;
+          const progressBar = progressPanel.querySelector('[role="progressbar"]');
+          progressBar.setAttribute("aria-valuenow", progressPercent);
+          document.querySelector("#progress-fill").style.width = `${progressPercent}%`;
+          document.querySelector("#progress-metrics").textContent = Object.entries(progress.logs || {})
+            .map(([name, value]) => `${pretty(name)} ${value}`)
+            .join(" · ");
+        }
         const retrainButton = document.querySelector("#retrain-button");
         retrainButton.disabled = state.busy || !state.status?.pending_uploads || jobState === "running";
         retrainButton.textContent = jobState === "running" ? "Retraining in progress…" : "Start retraining";
+        const epochsInput = document.querySelector("#retrain-epochs");
+        if (epochsInput) epochsInput.disabled = state.busy || jobState === "running";
       }
     }
   }, 5000);

@@ -1,4 +1,4 @@
-"""Fine-tune the saved model using the requesting account's uploaded images."""
+"""Fine-tune a user's selected model and publish promoted versions immutably."""
 import json
 import logging
 import os
@@ -7,14 +7,15 @@ from datetime import datetime
 
 from tensorflow import keras
 
-from src import config, database
+from src import config, database, model_versions
 from src.model import compile_model, evaluate_model, export_inference_model, unfreeze_top_layers
-from src import model_versions
 from src.preprocessing import list_images, make_dataset
 
 STATUS_PATH = config.MODELS_DIR / "retrain_status.json"
-METRICS_PATH = config.MODELS_DIR / "metrics.json"
-EPOCHS = int(os.getenv("RETRAIN_EPOCHS", "5"))
+DEFAULT_EPOCHS = int(os.getenv("RETRAIN_EPOCHS", "5"))
+MAX_EPOCHS = 20
+if not 1 <= DEFAULT_EPOCHS <= MAX_EPOCHS:
+    raise ValueError(f"RETRAIN_EPOCHS must be between 1 and {MAX_EPOCHS}.")
 HEARTBEAT_INTERVAL = 20
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def read_status():
     return {"state": "idle", "message": "No retraining yet", "updated_at": None}
 
 
-def write_status(state, message, owner_id=None, job_id=None):
+def write_status(state, message, owner_id=None, job_id=None, **details):
     config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
     status = {
         "state": state,
@@ -45,6 +46,7 @@ def write_status(state, message, owner_id=None, job_id=None):
         "owner_id": owner_id,
         "job_id": job_id,
         "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        **details,
     }
     temporary = STATUS_PATH.with_suffix(".json.tmp")
     with open(temporary, "w") as status_file:
@@ -52,15 +54,36 @@ def write_status(state, message, owner_id=None, job_id=None):
     os.replace(temporary, STATUS_PATH)
 
 
-def read_metrics():
-    if METRICS_PATH.exists():
-        with open(METRICS_PATH) as metrics_file:
-            return json.load(metrics_file)
-    return {}
+class EpochProgress(keras.callbacks.Callback):
+    def __init__(self, owner_id, job_id, epochs):
+        super().__init__()
+        self.owner_id = owner_id
+        self.job_id = job_id
+        self.epochs = epochs
+        self.completed_epochs = 0
+
+    def on_epoch_end(self, epoch, logs=None):
+        self.completed_epochs = epoch + 1
+        logs = logs or {}
+        values = {
+            key: round(float(value), 4)
+            for key, value in logs.items()
+            if value is not None
+        }
+        write_status(
+            "running",
+            f"Completed epoch {epoch + 1} of {self.epochs}.",
+            self.owner_id,
+            self.job_id,
+            stage="training",
+            epoch=epoch + 1,
+            epochs=self.epochs,
+            logs=values,
+        )
 
 
-def run_retraining(owner_id, job_id, epochs=EPOCHS):
-    """Run one account-scoped training job and persist its result or failure."""
+def run_retraining(owner_id, job_id, epochs=DEFAULT_EPOCHS, starting_version=None):
+    """Train from the requesting account's selected model and promote on validation gains."""
     started_at = database.now()
     pending = database.get_pending_uploads(owner_id)
     job_state = "done"
@@ -77,24 +100,38 @@ def run_retraining(owner_id, job_id, epochs=EPOCHS):
         daemon=True,
     )
     heartbeat.start()
+    candidate_model = config.MODELS_DIR / f"candidate-{job_id}.keras"
+    candidate_h5 = config.MODELS_DIR / f"candidate-{job_id}.h5"
     try:
+        write_status(
+            "running", "Preparing training data.", owner_id, job_id,
+            stage="preparing", epoch=0, epochs=epochs, logs={},
+        )
         class_names = config.load_class_names()
         uploads = database.get_all_uploads(owner_id)
+        user = database.user_by_id(owner_id)
+        if not user:
+            raise ValueError("The account associated with this training run no longer exists.")
+        starting_version = starting_version or user["active_model_version"]
 
         train_paths, train_labels = list_images(config.DATA_DIR / "train", class_names)
         val_paths, val_labels = list_images(config.DATA_DIR / "val", class_names)
-        test_paths, test_labels = list_images(config.DATA_DIR / "test", class_names)
         train_paths.extend(upload["path"] for upload in uploads)
         train_labels.extend(class_names.index(upload["label"]) for upload in uploads)
 
         train_ds = make_dataset(train_paths, train_labels, shuffle=True)
         val_ds = make_dataset(val_paths, val_labels)
-        test_ds = make_dataset(test_paths, test_labels)
 
-        model = keras.models.load_model(config.MODEL_PATH, compile=False)
+        model = keras.models.load_model(
+            model_versions.model_path(starting_version), compile=False
+        )
         compile_model(model, 1e-5)
-        old_metrics = evaluate_model(model, test_ds, class_names)
+        old_metrics = evaluate_model(model, val_ds, class_names)
 
+        write_status(
+            "running", "Fine-tuning the selected model.", owner_id, job_id,
+            stage="training", epoch=0, epochs=epochs, logs={},
+        )
         unfreeze_top_layers(model)
         compile_model(model, 1e-5)
         early_stopping = keras.callbacks.EarlyStopping(
@@ -102,47 +139,54 @@ def run_retraining(owner_id, job_id, epochs=EPOCHS):
             patience=2,
             restore_best_weights=True,
         )
+        progress_callback = EpochProgress(owner_id, job_id, epochs)
         model.fit(
             train_ds,
             validation_data=val_ds,
             epochs=epochs,
-            callbacks=[early_stopping],
+            callbacks=[
+                early_stopping,
+                progress_callback,
+            ],
             verbose=2,
         )
 
-        new_metrics = evaluate_model(model, test_ds, class_names)
-        promoted = new_metrics["accuracy"] >= old_metrics["accuracy"]
+        write_status(
+            "running", "Evaluating the candidate on the validation split.",
+            owner_id, job_id, stage="evaluating",
+            epoch=progress_callback.completed_epochs, epochs=epochs, logs={},
+        )
+        new_metrics = evaluate_model(model, val_ds, class_names)
+        promoted = new_metrics["accuracy"] > old_metrics["accuracy"]
+        new_version = None
         if promoted:
             config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
-            candidate_model = config.MODELS_DIR / "candidate.keras"
-            candidate_h5 = config.MODELS_DIR / "candidate.h5"
-
             model.save(candidate_model)
             export_inference_model(model).save(candidate_h5)
 
-            model_versions.set_active_version(model_versions.CURRENT)
-            current_metrics = model_versions.preserve_current_version()
-
-            os.replace(candidate_model, config.MODEL_PATH)
-            os.replace(candidate_h5, config.MODEL_H5_PATH)
-
-            updated_metrics = dict(new_metrics)
-            updated_metrics["baseline_accuracy"] = current_metrics.get("baseline_accuracy")
-            updated_metrics["version"] = current_metrics.get("version", 1) + 1
-            updated_metrics["note"] = f"Retrained with {len(uploads)} account-owned images"
-            updated_metrics["trained_at"] = database.now()
-            temporary_metrics = METRICS_PATH.with_suffix(".json.tmp")
-            with open(temporary_metrics, "w") as metrics_file:
-                json.dump(updated_metrics, metrics_file, indent=2)
-            os.replace(temporary_metrics, METRICS_PATH)
-            message = (
-                f"New model saved: accuracy {old_metrics['accuracy']} "
-                f"-> {new_metrics['accuracy']}"
+            version_metrics = dict(new_metrics)
+            version_metrics.update({
+                "evaluation_split": "validation",
+                "trained_at": database.now(),
+                "trained_epochs": epochs,
+                "improved_from_version": starting_version,
+            })
+            new_version = model_versions.save_version(
+                candidate_model, candidate_h5, version_metrics
             )
+            still_selected = database.user_by_id(owner_id)["active_model_version"] == starting_version
+            if still_selected:
+                database.set_active_model_version(owner_id, new_version)
+            message = (
+                f"Promoted {new_version}: validation accuracy improved from "
+                f"{old_metrics['accuracy']} to {new_metrics['accuracy']}."
+            )
+            if not still_selected:
+                message += " Your newer model selection was kept."
         else:
             message = (
-                f"The new model was worse ({new_metrics['accuracy']} vs "
-                f"{old_metrics['accuracy']}), so the previous model was kept."
+                f"No promotion: validation accuracy {new_metrics['accuracy']} did not "
+                f"exceed {starting_version} ({old_metrics['accuracy']})."
             )
 
         database.mark_used([upload["id"] for upload in pending], owner_id)
@@ -157,11 +201,20 @@ def run_retraining(owner_id, job_id, epochs=EPOCHS):
             old_metrics,
             new_metrics,
         )
-        write_status("done", message, owner_id, job_id)
+        write_status(
+            "done", message, owner_id, job_id,
+            stage="complete", epoch=progress_callback.completed_epochs,
+            epochs=epochs, logs={},
+            promoted=promoted,
+            model_version=database.user_by_id(owner_id)["active_model_version"],
+        )
     except Exception as error:
         job_state = "failed"
         message = f"Retraining failed: {error}"
-        write_status("failed", message, owner_id, job_id)
+        write_status(
+            "failed", message, owner_id, job_id,
+            stage="failed", epoch=0, epochs=epochs, logs={},
+        )
         database.add_run(
             owner_id,
             started_at,
@@ -173,6 +226,9 @@ def run_retraining(owner_id, job_id, epochs=EPOCHS):
         )
         raise
     finally:
+        for candidate in (candidate_model, candidate_h5):
+            if candidate.exists():
+                candidate.unlink()
         stop_heartbeat.set()
         heartbeat.join()
         database.finish_retraining(owner_id, job_id, job_state)

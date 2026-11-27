@@ -1,30 +1,37 @@
 """BeanGuard API for classification, authenticated retraining and dashboard data."""
 import io
-import json
 import os
 import time
 import uuid
 import zipfile
+import zlib
 from datetime import datetime
 
 import numpy as np
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.openapi.utils import get_openapi
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src import auth, config, database, model_versions
 from src.preprocessing import IMAGE_EXTENSIONS, validate_image
 from src.prediction import predict_image
-from src.retrain import METRICS_PATH, read_status, run_retraining, write_status
+from src.retrain import (
+    DEFAULT_EPOCHS,
+    MAX_EPOCHS,
+    read_status,
+    run_retraining,
+    write_status,
+)
 
 UI_DIST = config.BASE_DIR / "ui"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_BATCH_FILES = 100
-MAX_ZIP_BYTES = 250 * 1024 * 1024
+MAX_ZIP_BYTES = 500 * 1024 * 1024
 MAX_ZIP_FILES = 3000
-MAX_ZIP_UNCOMPRESSED = 600 * 1024 * 1024
+MAX_ZIP_UNCOMPRESSED = 800 * 1024 * 1024
 
 app = FastAPI(title="BeanGuard API")
 START_TIME = time.time()
@@ -44,6 +51,18 @@ class LoginPayload(BaseModel):
 
 class ModelVersionPayload(BaseModel):
     version: str
+
+
+class RetrainPayload(BaseModel):
+    epochs: int = Field(default=DEFAULT_EPOCHS, ge=1, le=MAX_EPOCHS)
+
+
+def _missing_zip_end_record(archive_bytes):
+    end_record_start = max(0, len(archive_bytes) - (65_535 + 22))
+    return (
+        archive_bytes.startswith(b"PK\x03\x04")
+        and archive_bytes.rfind(b"PK\x05\x06", end_record_start) == -1
+    )
 
 
 def _set_session(response, token):
@@ -152,11 +171,6 @@ def current_user(request: Request):
 def status(request: Request):
     """Public model status with private upload counts and history scoped to the logged-in user."""
     user = _optional_user(request)
-    metrics = None
-    if METRICS_PATH.exists():
-        with open(METRICS_PATH) as f:
-            metrics = json.load(f)
-
     retrain = read_status()
     if retrain.get("state") == "running" and not database.retraining_active():
         message = "Retraining stopped before it finished. Start retraining again."
@@ -169,44 +183,56 @@ def status(request: Request):
             "updated_at": retrain.get("updated_at"),
         }
 
-    active_version = model_versions.get_active_version()
-    versions = model_versions.available_versions()
+    active_version = (
+        user["active_model_version"] if user else model_versions.INITIAL_VERSION
+    )
+    versions = model_versions.available_versions(active_version)
+    active_metrics = model_versions.read_metrics(active_version)
     return {
         "status": "online",
         "uptime_seconds": int(time.time() - START_TIME),
         "started_at": datetime.fromtimestamp(START_TIME).isoformat(timespec="seconds"),
-        "model_available": model_versions.model_path(active_version).exists(),
+        "model_available": True,
         "active_model": active_version,
         "model_versions": versions,
-        "metrics": model_versions.read_metrics(active_version) if versions else metrics,
+        "metrics": active_metrics,
         "classes": config.load_class_names(),
         "retrain": retrain,
         "pending_uploads": database.count_pending(user["id"]) if user else None,
         "total_uploads": database.count_all_uploads(user["id"]) if user else None,
         "recent_runs": database.recent_runs(user["id"]) if user else [],
         "user": user,
+        "retrain_defaults": {
+            "epochs": DEFAULT_EPOCHS,
+            "max_epochs": MAX_EPOCHS,
+        },
     }
 
 
 @app.post("/model-version")
 def select_model_version(payload: ModelVersionPayload, request: Request):
-    """Select the model used by predictions for all signed-in users."""
-    _required_user(request)
+    """Select the prediction model for the signed-in account only."""
+    user = _required_user(request)
     try:
-        model_versions.set_active_version(payload.version)
+        model_versions.model_path(payload.version)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    database.set_active_model_version(user["id"], payload.version)
     return {"active_model": payload.version}
 
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)):
+async def predict(request: Request, file: UploadFile = File(...)):
     """Classify one valid image; users should upload bean-leaf photos for meaningful results."""
     contents = _read_bounded_upload(file, MAX_UPLOAD_BYTES)
+    user = _optional_user(request) if request else None
+    version = (
+        user["active_model_version"] if user else model_versions.INITIAL_VERSION
+    )
     try:
-        result = await run_in_threadpool(predict_image, contents)
+        result = await run_in_threadpool(predict_image, contents, version)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except FileNotFoundError as error:
@@ -217,19 +243,37 @@ async def predict(file: UploadFile = File(...)):
 def store_image(image, label, owner_id):
     """Save an image and record its owner for isolated future training runs."""
     folder = config.UPLOADS_DIR / label
-    folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{uuid.uuid4().hex}.jpg"
-    image.save(path, "JPEG", quality=95)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        image.save(path, "JPEG", quality=95)
+    except PermissionError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The server cannot write to upload storage. Give the API process "
+                "write access to data/uploads, then retry the upload."
+            ),
+        ) from error
     database.add_upload(path, label, owner_id)
 
 
-def schedule_retraining(background_tasks, owner_id, message):
+def schedule_retraining(background_tasks, owner_id, message, epochs, starting_version):
     job_id = database.claim_retraining(owner_id)
     if job_id is None:
         return False
     try:
-        write_status("running", message, owner_id, job_id)
-        background_tasks.add_task(run_retraining, owner_id, job_id)
+        write_status(
+            "running", message, owner_id, job_id,
+            stage="queued", epoch=0, epochs=epochs, logs={},
+        )
+        background_tasks.add_task(
+            run_retraining,
+            owner_id,
+            job_id,
+            epochs=epochs,
+            starting_version=starting_version,
+        )
     except Exception:
         database.finish_retraining(owner_id, job_id, "failed")
         raise
@@ -285,40 +329,58 @@ async def upload_zip(
     class_names = config.load_class_names()
     archive_bytes = await file.read(MAX_ZIP_BYTES + 1)
     if len(archive_bytes) > MAX_ZIP_BYTES:
-        raise HTTPException(status_code=413, detail="Zip file exceeds the 250 MB limit.")
+        limit_mb = MAX_ZIP_BYTES // (1024 * 1024)
+        raise HTTPException(status_code=413, detail=f"Zip file exceeds the {limit_mb} MB limit.")
     try:
         archive = zipfile.ZipFile(io.BytesIO(archive_bytes))
-    except zipfile.BadZipFile as error:
-        raise HTTPException(status_code=400, detail="This is not a valid .zip file.") from error
+    except (zipfile.BadZipFile, EOFError, OSError) as error:
+        size_mb = len(archive_bytes) / (1024 * 1024)
+        if _missing_zip_end_record(archive_bytes):
+            detail = (
+                f"The uploaded file is {size_mb:.1f} MB and starts like a ZIP, but its "
+                "end-of-central-directory record is missing. The archive is incomplete "
+                "or split across multiple files; recreate it as a standard single-file "
+                "ZIP and upload that complete file."
+            )
+        else:
+            detail = (
+                f"Could not open the uploaded file as a ZIP archive ({size_mb:.1f} MB). "
+                f"ZIP parser reason: {error}. The file may be incomplete or damaged, renamed "
+                "from another format, or part of a multi-volume archive. Create a standard "
+                "single-file .zip and retry."
+            )
+        raise HTTPException(status_code=400, detail=detail) from error
 
-    members = [member for member in archive.infolist() if not member.is_dir()]
-    if (
-        len(members) > MAX_ZIP_FILES
-        or sum(member.file_size for member in members) > MAX_ZIP_UNCOMPRESSED
-    ):
-        raise HTTPException(status_code=400, detail="Zip exceeds the unpacked file limits.")
+    with archive:
+        members = [member for member in archive.infolist() if not member.is_dir()]
+        if (
+            len(members) > MAX_ZIP_FILES
+            or sum(member.file_size for member in members) > MAX_ZIP_UNCOMPRESSED
+        ):
+            raise HTTPException(status_code=400, detail="Zip exceeds the unpacked file limits.")
 
-    per_class = {class_name: 0 for class_name in class_names}
-    unknown_folders, broken = set(), 0
-    for member in members:
-        parts = member.filename.replace("\\", "/").split("/")
-        filename = parts[-1]
-        if "__MACOSX" in parts or filename.startswith(".") or not filename.lower().endswith(IMAGE_EXTENSIONS):
-            continue
-        folder = normalise(parts[-2]) if len(parts) > 1 else ""
-        if folder not in class_names:
-            unknown_folders.add(parts[-2] if len(parts) > 1 else "(top level)")
-            continue
-        if member.file_size > MAX_UPLOAD_BYTES:
-            broken += 1
-            continue
-        try:
-            contents = archive.read(member)
-            image = validate_image(contents)
+        per_class = {class_name: 0 for class_name in class_names}
+        unknown_folders, broken = set(), 0
+        for member in members:
+            parts = member.filename.replace("\\", "/").split("/")
+            filename = parts[-1]
+            if "__MACOSX" in parts or filename.startswith(".") or not filename.lower().endswith(IMAGE_EXTENSIONS):
+                continue
+            folder = normalise(parts[-2]) if len(parts) > 1 else ""
+            if folder not in class_names:
+                unknown_folders.add(parts[-2] if len(parts) > 1 else "(top level)")
+                continue
+            if member.file_size > MAX_UPLOAD_BYTES:
+                broken += 1
+                continue
+            try:
+                contents = archive.read(member)
+                image = validate_image(contents)
+            except (ValueError, zipfile.BadZipFile, RuntimeError, NotImplementedError, EOFError, OSError, zlib.error):
+                broken += 1
+                continue
             store_image(image, folder, user["id"])
             per_class[folder] += 1
-        except ValueError:
-            broken += 1
 
     total = sum(per_class.values())
     if total == 0:
@@ -337,14 +399,24 @@ async def upload_zip(
 
 
 @app.post("/retrain")
-def retrain(request: Request, background_tasks: BackgroundTasks):
+def retrain(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    payload: RetrainPayload = RetrainPayload(),
+):
     """Start a training run using only this account's uploads."""
     user = _required_user(request)
     if database.count_pending(user["id"]) == 0:
         raise HTTPException(status_code=400, detail="Upload new images before retraining.")
-    if not schedule_retraining(background_tasks, user["id"], "Retraining started."):
+    if not schedule_retraining(
+        background_tasks,
+        user["id"],
+        "Retraining started.",
+        payload.epochs,
+        user["active_model_version"],
+    ):
         raise HTTPException(status_code=409, detail="Retraining is already running.")
-    return {"message": "Retraining started."}
+    return {"message": "Retraining started.", "epochs": payload.epochs}
 
 
 _colour_cache = {}
@@ -389,3 +461,36 @@ def insights():
 
 if UI_DIST.is_dir():
     app.mount("/", StaticFiles(directory=UI_DIST, html=True), name="ui")
+
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        routes=app.routes,
+    )
+
+    def mark_binary_uploads(node):
+        if isinstance(node, dict):
+            if (
+                node.get("type") == "string"
+                and node.get("contentMediaType") == "application/octet-stream"
+            ):
+                node.pop("contentMediaType")
+                node["format"] = "binary"
+            for value in node.values():
+                mark_binary_uploads(value)
+        elif isinstance(node, list):
+            for value in node:
+                mark_binary_uploads(value)
+
+    mark_binary_uploads(schema)
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi

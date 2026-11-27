@@ -73,7 +73,10 @@ def authenticate(email, password):
     user = database.user_by_email(email.strip().lower())
     if not user or not verify_password(password, user["password_hash"]):
         return None
-    return {key: user[key] for key in ("id", "email", "display_name")}
+    return {
+        key: user[key]
+        for key in ("id", "email", "display_name", "active_model_version")
+    }
 
 
 def create_session(user_id):

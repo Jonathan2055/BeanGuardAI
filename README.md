@@ -14,8 +14,8 @@ Angular leaf spot and bean rust are key bean diseases in Uganda and the wider re
 ## Features
 
 - **Predict:** upload one leaf photo and get the class, the confidence and all class probabilities. Use a close photo of a single bean leaf (see [Limitations](#limitations)).
-- **Dashboard:** API up-time, model version, test-set metrics, confusion matrix and retraining history.
-- **Model versions:** each successful retrain keeps the former current model as a previous version; logged-in users can choose which saved version serves predictions. Retraining always starts from the current model.
+- **Dashboard:** API up-time, selected model version, evaluation metrics, confusion matrix, retraining progress and account-scoped history.
+- **Model versions:** promoted models are saved as immutable numbered versions. Each account selects its own prediction model; a newly promoted version never switches other users. Retraining starts from that account's selected model.
 - **Data insights:** class balance, average colour per class and per-class F1.
 - **Upload and retrain** (login required): upload several images of one class, or a `.zip` with one folder per class, then start retraining. Retraining runs in the background.
 
@@ -47,7 +47,7 @@ With only 153 test images, treat these scores as roughly ±5 points. Full traini
 │   └── config.py          paths and settings
 ├── ui/                    index.html, app.js, styles.css
 ├── data/                  train/ val/ test/ (from the notebook), uploads/, app.db
-├── models/                bean_model.keras, bean_model.h5, metrics.json
+├── models/                notebook baseline, metrics, and immutable versions/
 ├── tests/                 authentication and database tests
 ├── Dockerfile, docker-compose.yml, nginx.conf, Caddyfile
 ├── locustfile.py          load test
@@ -72,9 +72,21 @@ Open <http://localhost:8000> (API docs at `/docs`). Register an account to uploa
 
 The repository already contains a trained model in `models/`, so you only need the notebook to retrain from scratch.
 
+## Uploading data and retraining
+
+Log in, open **Improve the model**, and upload either individual JPEG/PNG images with one selected class, or a ZIP whose root contains one folder per class (for example, `healthy/leaf.jpg`). A ZIP with an extra enclosing folder will not match this layout. Accepted class folder names are shown on the page. ZIP uploads are limited to 500 MB compressed, 800 MB unpacked, and 3,000 files; each image is limited to 10 MB. The Nginx body limit allows 550 MB to accommodate multipart overhead.
+
+An upload is saved under `data/uploads/` and added to that account's pending queue; it does not immediately change the model. The pending count shows how many not-yet-trained uploads are queued. Choose **Start retraining** to fine-tune your selected version using the original training split plus your saved uploads. You can set epochs from 1 to 20 (default 5); early stopping may end training sooner. The dashboard reports epoch progress, training/validation metrics and the final outcome.
+
+Candidates are promoted only when their validation accuracy strictly improves over the selected starting version. The held-out test split is not used to select versions. A promoted model is stored as a new immutable version (`v2`, `v3`, ...), and only the account that ran the training automatically switches to it. Other accounts keep their existing selections, but can choose the newly available version. New accounts and signed-out predictions use `v1` by default.
+
+If an upload returns a storage permission error, the API process cannot write under `data/uploads/`. On Linux, repair ownership from the repository root with `sudo chown -R "$(id -u):$(id -g)" data/uploads`. Docker Compose runs the API as UID/GID 1000 by default to avoid creating new root-owned uploads; set `APP_UID` and `APP_GID` to the host account's numeric IDs when they differ.
+
+`POST /retrain` requires a logged-in account and at least one pending upload. It returns **Retraining started** when it queues a background run; check the dashboard's job state and retraining history for the eventual result. A failed image save does not add that image to the queue, so fix upload storage and retry before expecting that image to be used.
+
 ## Train the model (notebook)
 
-Open `notebook/bean_guard_notebook.ipynb` on Kaggle, attach the *Bean Disease Dataset*, enable a GPU and run all cells. It cleans the images, makes a stratified 70/15/15 split, trains the baseline and the MobileNetV2 model, and writes `models/bean_model.keras` (used by the API and retraining), `models/bean_model.h5` (inference-only copy), `models/metrics.json` and `data/class_names.json`. It also runs locally if the dataset is in `data/raw_data/`.
+Open `notebook/bean_guard_notebook.ipynb` on Kaggle, attach the *Bean Disease Dataset*, enable a GPU and run all cells. It cleans the images, makes a stratified 70/15/15 split, trains the baseline and the MobileNetV2 model, and writes `models/bean_model.keras`, `models/bean_model.h5` (inference-only copy), `models/metrics.json` and `data/class_names.json`. On first use, the API snapshots this notebook model as immutable `models/versions/v1`; later promoted models are saved alongside it. It also runs locally if the dataset is in `data/raw_data/`.
 
 ## Docker
 

@@ -40,6 +40,7 @@ def init_db():
                 email TEXT NOT NULL UNIQUE,
                 display_name TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
+                active_model_version TEXT NOT NULL DEFAULT 'v1',
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS sessions (
@@ -72,6 +73,12 @@ def init_db():
                 claimed_at TEXT NOT NULL
             );
         """)
+
+        user_columns = _columns(db, "users")
+        if "active_model_version" not in user_columns:
+            db.execute(
+                "ALTER TABLE users ADD COLUMN active_model_version TEXT NOT NULL DEFAULT 'v1'"
+            )
 
         upload_columns = _columns(db, "uploads")
         if "owner_id" not in upload_columns:
@@ -106,7 +113,8 @@ def create_user(email, display_name, password_hash):
 def user_by_email(email):
     with connect() as db:
         row = db.execute(
-            "SELECT id, email, display_name, password_hash FROM users WHERE email = ?",
+            """SELECT id, email, display_name, password_hash, active_model_version
+               FROM users WHERE email = ?""",
             (email,),
         ).fetchone()
     return dict(row) if row else None
@@ -115,10 +123,20 @@ def user_by_email(email):
 def user_by_id(user_id):
     with connect() as db:
         row = db.execute(
-            "SELECT id, email, display_name FROM users WHERE id = ?",
+            """SELECT id, email, display_name, active_model_version
+               FROM users WHERE id = ?""",
             (user_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+def set_active_model_version(user_id, version):
+    with connect() as db:
+        cursor = db.execute(
+            "UPDATE users SET active_model_version = ? WHERE id = ?",
+            (version, user_id),
+        )
+    return cursor.rowcount == 1
 
 
 def add_session(token_digest, user_id, expires_at):
@@ -132,7 +150,7 @@ def add_session(token_digest, user_id, expires_at):
 def session_user(token_digest, current_time):
     with connect() as db:
         row = db.execute(
-            """SELECT users.id, users.email, users.display_name
+            """SELECT users.id, users.email, users.display_name, users.active_model_version
                FROM sessions JOIN users ON users.id = sessions.user_id
                WHERE sessions.token_digest = ? AND sessions.expires_at > ?""",
             (token_digest, current_time),
@@ -257,7 +275,7 @@ def claim_retraining(owner_id):
             claimed_at = datetime.fromisoformat(active["claimed_at"])
             if current_time - claimed_at < RETRAINING_LEASE:
                 return None
-            db.execute("DELETE FROM retrain_jobs WHERE singleton_id = 1")
+        db.execute("DELETE FROM retrain_jobs WHERE singleton_id = 1")
         db.execute(
             """INSERT INTO retrain_jobs (singleton_id, job_id, owner_id, state, claimed_at)
                VALUES (1, ?, ?, 'running', ?)""",

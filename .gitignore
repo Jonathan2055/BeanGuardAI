@@ -11,6 +11,8 @@ data/app.db*
 data/uploads/
 models/retrain_status.json
 models/candidate*
+models/versions/
 ui/node_modules/
 ui/dist/
 results/
+tests/
