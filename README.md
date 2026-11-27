@@ -1,66 +1,81 @@
 # BeanGuard AI
 
-Screen a photo of a bean leaf for **angular leaf spot**, **bean rust**, or a **healthy** leaf. A MobileNetV2 model (transfer learning) is served by a FastAPI app with a web dashboard, where logged-in users can upload labelled photos and retrain the model.
+BeanGuard screens bean-leaf photos for **angular leaf spot**, **bean rust**, or **healthy** using a fine-tuned MobileNetV2 model. It is an educational screening aid, not a diagnosis.
 
-Live app : <http://51.20.10.95/> . [API docs (Swagger)](http://51.20.10.95/docs) 
-Demo video : [YouTube link](https://youtu.be/sbu2-QBdUBs) 
-Dataset : [Bean Disease Dataset on Kaggle](https://www.kaggle.com/datasets/therealoise/bean-disease-dataset) 
-Notebook : [notebook/bean_guard_notebook.ipynb](notebook/bean_guard_notebook.ipynb) 
-
-## Problem
-
-Angular leaf spot and bean rust are key bean diseases in Uganda and the wider region. They reduce yields, and farmers often have to wait for an expert to identify them. BeanGuard gives a first screening from a phone photo. It is a **screening aid, not a diagnosis**: confirm with an extension officer before treating a field.
+- **Live app:** [51.20.10.95](http://51.20.10.95/) · 
+- **[API (Swagger)](http://51.20.10.95/docs)** · 
+- **[Demo video](https://youtu.be/sbu2-QBdUBs)** · 
+- **[Training notebook](notebook/bean_guard_notebook.ipynb)** · 
+- **[Dataset](https://www.kaggle.com/datasets/therealoise/bean-disease-dataset)**- 
 
 ## Features
 
-- **Predict:** upload one leaf photo and get the class, the confidence and all class probabilities. Use a close photo of a single bean leaf (see [Limitations](#limitations)).
-- **Dashboard:** API up-time, selected model version, evaluation metrics, confusion matrix, retraining progress and account-scoped history.
-- **Model versions:** promoted models are saved as immutable numbered versions. Each account selects its own prediction model; a newly promoted version never switches other users. Retraining starts from that account's selected model.
-- **Data insights:** class balance, average colour per class and per-class F1.
-- **Upload and retrain** (login required): upload several images of one class, or a `.zip` with one folder per class, then start retraining. Retraining runs in the background.
+- Predict a class, confidence, and per-class probabilities from a bean-leaf photo.
+- Explore model metrics, class balance, colour insights, and retraining history.
+- Register to upload labeled images, retrain, and select your model version.
+- Inspect or call the API through Swagger at `/docs`.
+
+## Install and run with Docker
+
+1. Install Git, Docker Engine, and the Docker Compose plugin.
+2. Clone the repository and enter it:
+   ```bash
+   git clone https://github.com/Jonathan2055/BeanGuardAI.git
+   cd BeanGuardAI
+   ```
+3. Create local settings with a unique secret:
+   ```bash
+   printf 'APP_SECRET_KEY=%s\nCOOKIE_SECURE=false\nAPP_DOMAIN=localhost\n' \
+     "$(openssl rand -hex 32)" > .env
+   ```
+4. Build and start the app:
+   ```bash
+   docker compose up -d --build
+   docker compose ps
+   curl http://localhost:8080/health
+   ```
+5. Open [the dashboard](http://localhost:8080/) or [Swagger](http://localhost:8080/docs). Stop with `docker compose down`; data and models remain on disk.
+
+The repository includes the trained model and dataset splits. Docker mounts `data/` and `models/` for persistence. The default local setup uses HTTP; for a real domain, set `APP_DOMAIN` and `COOKIE_SECURE=true`, open ports 80/443, and start with `docker compose --profile https up -d --build`.
+
+## Dashboard guide
+
+1. **Overview:** check service/model status, evaluation metrics, and your retraining history.
+2. **Image prediction:** upload a clear, close-up JPEG or PNG of one bean leaf (up to 10 MB), then select **Analyze image**. The result shows the predicted class and probabilities.
+3. **Data insights:** review training class counts, average image colours, and per-class performance.
+4. **Upload & retrain:** register or log in, then upload images individually under their correct class or as a ZIP with one folder per class. Review the pending count and start retraining (1–20 epochs). Results appear in the dashboard. Incorrect labels may reduce model quality.
+
+Only bean-leaf photos are suitable: other images are still assigned one of the model's three classes. Verify important decisions with an agronomist.
+
+## API quick guide
+
+Open `/docs` and use **Try it out**. Register or log in first for account-only operations; the session cookie is set automatically.
+
+| Endpoint | What to provide / purpose |
+|---|---|
+| `POST /predict` | Multipart field `file`: one JPEG/PNG bean-leaf image, max 10 MB. Returns the prediction and probabilities. Works without login. |
+| `POST /upload` | Login required. Multipart `label` (one of the listed classes) and `files` (1–100 JPEG/PNG images, max 10 MB each); queues labeled data for your retraining. |
+| `POST /upload-zip` | Login required. Multipart `file`: ZIP with class-named folders at its root, e.g. `healthy/leaf.jpg`. Max 500 MB compressed. |
+| `POST /retrain` | Login required and pending uploads required. JSON `{"epochs": 5}` starts a background run (1–20 epochs; default 5). |
+| `POST /model-version` | Login required. JSON `{"version": "v1"}` selects an available model for your account. |
+| `GET /status`, `GET /insights` | Read model/service status and dataset summaries. |
 
 ## Results
 
-Evaluated once on the held-out test split (153 images, 51 per class) after all choices were made on the validation split.
+Held-out test split (153 images; 51 per class):
 
-| Model | Accuracy | Precision | Recall | F1 |
-|---|---:|---:|---:|---:|
-| Baseline CNN (from scratch) | 71.9% | 72.3% | 71.9% | 71.5% |
-| **MobileNetV2, fine-tuned** | **89.5%** | **89.8%** | **89.5%** | **89.6%** |
+| Model | Accuracy | Macro F1 |
+|---|---:|---:|
+| Baseline CNN | 71.9% | 71.5% |
+| Fine-tuned MobileNetV2 | **89.5%** | **89.6%** |
 
-Precision, recall and F1 are macro averages. Per-class F1: angular leaf spot 0.89, bean rust 0.85, healthy 0.95. The final model makes 16 errors on 153 images. Of the 102 diseased leaves, 100 were flagged as diseased, but only 89 got the exact disease right. Bean rust and angular leaf spot are mostly confused with each other.
+Scores are based on a small test set and may not generalize to other phones, lighting, or backgrounds. See the notebook for data preparation, training, and detailed evaluation.
 
-With only 153 test images, treat these scores as roughly ±5 points. Full training, optimisation steps and interpretation are in the notebook.
+## Local development and load testing
 
-## Repository layout
-
-```
-├── notebook/bean_guard_notebook.ipynb   data preparation, training, evaluation
-├── src/
-│   ├── preprocessing.py   image loading, validation, augmentation
-│   ├── model.py           model, fine-tuning, evaluation helpers
-│   ├── prediction.py      load the saved model and predict one image
-│   ├── retrain.py         retraining pipeline
-│   ├── auth.py            accounts and sessions
-│   ├── database.py        SQLite: users, uploads, retraining runs
-│   ├── api.py             FastAPI app
-│   └── config.py          paths and settings
-├── ui/                    index.html, app.js, styles.css
-├── data/                  train/ val/ test/ (from the notebook), uploads/, app.db
-├── models/                notebook baseline, metrics, and immutable versions/
-├── tests/                 authentication and database tests
-├── Dockerfile, docker-compose.yml, nginx.conf, Caddyfile
-├── locustfile.py          load test
-└── requirements.txt
-```
-
-## Setup
-
-**Requirements:** Python **3.13**. TensorFlow 2.21 supports Python 3.10 to 3.13, so **do not use Python 3.14**: `pip install tensorflow` fails there.
+For local development, use Python 3.13 (TensorFlow does not support Python 3.14 in this setup):
 
 ```bash
-git clone https://github.com/Jonathan2055/BeanGuardAI.git && cd BeanGuardAI
-python3.13 --version                      # must print 3.13.x because the tensorflow doesn't have a released updates that works with python 3.14
 python3.13 -m venv .venv
 source .venv/bin/activate                 # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -68,76 +83,16 @@ export APP_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(
 uvicorn src.api:app --host 0.0.0.0 --port 8000
 ```
 
-Open <http://localhost:8000> (API docs at `/docs`). Register an account to upload data or retrain. `APP_SECRET_KEY` must be at least 32 random characters. Run the tests with `python -m pytest tests`.
-
-The repository already contains a trained model in `models/`, so you only need the notebook to retrain from scratch.
-
-## Uploading data and retraining
-
-Log in, open **Improve the model**, and upload either individual JPEG/PNG images with one selected class, or a ZIP whose root contains one folder per class (for example, `healthy/leaf.jpg`). A ZIP with an extra enclosing folder will not match this layout. Accepted class folder names are shown on the page. ZIP uploads are limited to 500 MB compressed, 800 MB unpacked, and 3,000 files; each image is limited to 10 MB. The Nginx body limit allows 550 MB to accommodate multipart overhead.
-
-An upload is saved under `data/uploads/` and added to that account's pending queue; it does not immediately change the model. The pending count shows how many not-yet-trained uploads are queued. Choose **Start retraining** to fine-tune your selected version using the original training split plus your saved uploads. You can set epochs from 1 to 20 (default 5); early stopping may end training sooner. The dashboard reports epoch progress, training/validation metrics and the final outcome.
-
-Candidates are promoted only when their validation accuracy strictly improves over the selected starting version. The held-out test split is not used to select versions. A promoted model is stored as a new immutable version (`v2`, `v3`, ...), and only the account that ran the training automatically switches to it. Other accounts keep their existing selections, but can choose the newly available version. New accounts and signed-out predictions use `v1` by default.
-
-If an upload returns a storage permission error, the API process cannot write under `data/uploads/`. On Linux, repair ownership from the repository root with `sudo chown -R "$(id -u):$(id -g)" data/uploads`. Docker Compose runs the API as UID/GID 1000 by default to avoid creating new root-owned uploads; set `APP_UID` and `APP_GID` to the host account's numeric IDs when they differ.
-
-`POST /retrain` requires a logged-in account and at least one pending upload. It returns **Retraining started** when it queues a background run; check the dashboard's job state and retraining history for the eventual result. A failed image save does not add that image to the queue, so fix upload storage and retry before expecting that image to be used.
-
-## Train the model (notebook)
-
-Open `notebook/bean_guard_notebook.ipynb` on Kaggle, attach the *Bean Disease Dataset*, enable a GPU and run all cells. It cleans the images, makes a stratified 70/15/15 split, trains the baseline and the MobileNetV2 model, and writes `models/bean_model.keras`, `models/bean_model.h5` (inference-only copy), `models/metrics.json` and `data/class_names.json`. On first use, the API snapshots this notebook model as immutable `models/versions/v1`; later promoted models are saved alongside it. It also runs locally if the dataset is in `data/raw_data/`.
-
-## Docker
+Run tests with `python -m pytest tests`. For load testing, start the Docker app above, then install and run Locust from the repository root. Using the virtual-environment Python avoids relying on a globally installed `locust` command:
 
 ```bash
-cat .env          # set APP_SECRET_KEY: (with 32+ characters); keep COOKIE_SECURE=false for local HTTP
-docker compose up -d --build
-curl http://localhost:8080/health
-```
-
-Open <http://localhost:8080>. `data/` and `models/` are bind-mounted, so the database, uploads and models survive rebuilds. Back them up separately. Stop with `docker compose down` (data is kept).
-
-**HTTPS:** set `APP_DOMAIN` to a real hostname and `COOKIE_SECURE=true` in `.env`, open TCP ports 80 and 443, then run `docker compose --profile https up -d --build`. Caddy obtains and renews the certificate.
-
-## Deployment (AWS)
-
-Deployed on an AWS EC2 instance with Docker Compose and HTTPS.
-
-1. Launch an Ubuntu instance with at least 4 GB RAM. Allow inbound TCP 22 (your IP only), 80 and 443.
-2. Install Docker Engine and the Compose plugin, then clone this repository.
-3. Make sure `models/` and `data/` (train, val, test, `class_names.json`) are present on the instance.
-4. Create `.env` as above, then run `docker compose --profile https up -d --build`.
-5. Check `https://<your-domain>/health`.
-
-## Load test (Locust)
-
-`locustfile.py` posts held-out leaf images to `/predict`. Run it from the repository root against the same host and with the same settings for every run, changing only the number of API containers:
-
-```bash
+python3.13 -m venv .venv
+.venv/bin/python -m pip install locust
 mkdir -p results
-docker compose up -d --scale api=1        # then 2 and 3
-locust -f locustfile.py --headless -u 20 -r 4 -t 2m \
+.venv/bin/python -m locust -f locustfile.py --headless -u 20 -r 4 -t 2m \
   --host http://localhost:8080 --csv results/containers_1 --html results/containers_1.html
 ```
 
-| API containers | Users | Requests | Failures | Median (ms) | p95 (ms) | Requests/s |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 20 | 1,269 | 1,269 | 780 | 1,200 | 20.29 |
-| 2 | 20 | 80 | 0 | 2,000 | 3,500 | 6.52 |
-| 3 | 20 | 0 | 0 | - | - | 0.00 |
+The workload uses a held-out image from `data/test/healthy`. The API is intended to run as one container with SQLite/local-file storage. Existing multi-container measurements were inconsistent and do not support a reliable scaling comparison.
 
-The one-container run completed 1,269 requests but every request was counted as a failure: 1,268 responses were not valid JSON and one returned HTTP 500. The two-container run had no failures, but it measured 2,000 ms median and 3,500 ms p95 latency, versus 780 ms median and 1,200 ms p95 for the earlier run. Its throughput was 6.52 requests/s, lower than 20.29 requests/s in the earlier run. The three-container run produced no completed requests and therefore has no valid performance measurement.
-
-These runs do not establish a reliable container-scaling comparison because they used different application states and the one-container run recorded response failures. Containers on one machine also share CPU and memory, so adding containers does not always improve latency or throughput proportionally.
-
-## Limitations
-
-- Trained on 990 field photos from one dataset. Photos from other phones, lighting or backgrounds may score lower than the test split.
-- **Photos that are not bean leaves are still classified.** The app only checks that a file is a valid image. If someone uploads a photo of something else (a person, a different plant, soil), the model still answers with one of its three classes, with a confidence that can look high. The model has only ever seen bean leaves, so it has no idea of other images. We tried to add an input check that compares a photo's internal model features with the training leaves, but it did not help in our tests (non-bean photos were still accepted), so we did not continue with it and removed it. Only upload close photos of a single bean leaf.
-- Retraining trusts the labels users upload. Wrong labels can make the model worse.
-- SQLite and local files suit a single server, not large-scale use.
-
-## Credits
-
-Images: Bean Disease Dataset on Kaggle, which matches the Makerere AI Lab "Beans" data (field photos from Uganda, annotated with NaCRRI). 
+To retrain from scratch, open `notebook/bean_guard_notebook.ipynb`, attach the Bean Disease Dataset, and run all cells.

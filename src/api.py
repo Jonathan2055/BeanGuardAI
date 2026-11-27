@@ -33,28 +33,51 @@ MAX_ZIP_BYTES = 500 * 1024 * 1024
 MAX_ZIP_FILES = 3000
 MAX_ZIP_UNCOMPRESSED = 800 * 1024 * 1024
 
-app = FastAPI(title="BeanGuard API")
+app = FastAPI(
+    title="BeanGuard API",
+    description=(
+        "Classify bean-leaf photos as angular leaf spot, bean rust, or healthy. "
+        "Use **POST /predict** with a JPEG or PNG image (multipart field `file`) for "
+        "a prediction. Only bean-leaf images are meaningful; this is a screening aid, "
+        "not a diagnosis. Account, upload, and retraining endpoints require a session "
+        "created by **POST /auth/register** or **POST /auth/login**."
+    ),
+    openapi_tags=[
+        {"name": "Health", "description": "Check whether the API is responding."},
+        {"name": "Authentication", "description": "Create and manage your account session."},
+        {"name": "Prediction", "description": "Classify one bean-leaf image."},
+        {"name": "Models", "description": "Inspect status or choose an account model version."},
+        {"name": "Training data", "description": "Upload labeled images for your account's retraining queue."},
+        {"name": "Retraining", "description": "Start and monitor account-scoped model retraining."},
+        {"name": "Insights", "description": "View dataset summaries for the dashboard."},
+    ],
+)
 START_TIME = time.time()
 database.init_db()
 
 
 class RegisterPayload(BaseModel):
-    email: str
-    display_name: str
-    password: str
+    email: str = Field(description="Email address used to sign in.")
+    display_name: str = Field(description="Name shown in your BeanGuard account (1-80 characters).")
+    password: str = Field(description="Password for this account (10-128 characters).")
 
 
 class LoginPayload(BaseModel):
-    email: str
-    password: str
+    email: str = Field(description="Email address used when registering.")
+    password: str = Field(description="Password for this account.")
 
 
 class ModelVersionPayload(BaseModel):
-    version: str
+    version: str = Field(description="Available model version to use, such as v1.")
 
 
 class RetrainPayload(BaseModel):
-    epochs: int = Field(default=DEFAULT_EPOCHS, ge=1, le=MAX_EPOCHS)
+    epochs: int = Field(
+        default=DEFAULT_EPOCHS,
+        ge=1,
+        le=MAX_EPOCHS,
+        description=f"Maximum training epochs (1-{MAX_EPOCHS}); early stopping may finish sooner.",
+    )
 
 
 def _missing_zip_end_record(archive_bytes):
@@ -116,12 +139,23 @@ def _read_bounded_upload(file, limit):
     return contents
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    summary="Check API availability",
+    description="A lightweight liveness check. For model details, see `GET /status`.",
+    tags=["Health"],
+)
 def health():
     return {"status": "ok"}
 
 
-@app.post("/auth/register", status_code=201)
+@app.post(
+    "/auth/register",
+    status_code=201,
+    summary="Create an account",
+    description="Provide an email, display name, and password. Creates an account and starts a session.",
+    tags=["Authentication"],
+)
 def register(payload: RegisterPayload, response: Response):
     _validate_auth_configuration()
     try:
@@ -132,7 +166,12 @@ def register(payload: RegisterPayload, response: Response):
     return user
 
 
-@app.post("/auth/login")
+@app.post(
+    "/auth/login",
+    summary="Sign in",
+    description="Provide the email and password used to register. Starts a session on success.",
+    tags=["Authentication"],
+)
 def login(payload: LoginPayload, response: Response):
     _validate_auth_configuration()
     user = auth.authenticate(payload.email, payload.password)
@@ -142,7 +181,12 @@ def login(payload: LoginPayload, response: Response):
     return user
 
 
-@app.post("/auth/logout")
+@app.post(
+    "/auth/logout",
+    summary="Sign out",
+    description="Ends the current session and clears its browser cookie.",
+    tags=["Authentication"],
+)
 def logout(request: Request, response: Response):
     token = request.cookies.get(auth.SESSION_COOKIE)
     try:
@@ -159,7 +203,12 @@ def logout(request: Request, response: Response):
     return {"message": "Logged out."}
 
 
-@app.get("/auth/me")
+@app.get(
+    "/auth/me",
+    summary="Get the signed-in account",
+    description="Returns the current account when a valid session cookie is present.",
+    tags=["Authentication"],
+)
 def current_user(request: Request):
     user = _optional_user(request)
     if not user:
@@ -167,9 +216,14 @@ def current_user(request: Request):
     return user
 
 
-@app.get("/status")
+@app.get(
+    "/status",
+    summary="Get service and model status",
+    description="Returns model versions and evaluation metrics; upload counts and retraining history are scoped to the signed-in account.",
+    tags=["Models"],
+)
 def status(request: Request):
-    """Public model status with private upload counts and history scoped to the logged-in user."""
+    """Return public model status and account-scoped upload and retraining details."""
     user = _optional_user(request)
     retrain = read_status()
     if retrain.get("state") == "running" and not database.retraining_active():
@@ -209,7 +263,12 @@ def status(request: Request):
     }
 
 
-@app.post("/model-version")
+@app.post(
+    "/model-version",
+    summary="Choose a model version",
+    description="Select an available model for predictions made by your account. This does not change other accounts' selections.",
+    tags=["Models"],
+)
 def select_model_version(payload: ModelVersionPayload, request: Request):
     """Select the prediction model for the signed-in account only."""
     user = _required_user(request)
@@ -223,9 +282,25 @@ def select_model_version(payload: ModelVersionPayload, request: Request):
     return {"active_model": payload.version}
 
 
-@app.post("/predict")
-async def predict(request: Request, file: UploadFile = File(...)):
-    """Classify one valid image; users should upload bean-leaf photos for meaningful results."""
+@app.post(
+    "/predict",
+    summary="Predict a bean-leaf class",
+    description=(
+        "Upload one JPEG or PNG bean-leaf photo as multipart field `file` (maximum 10 MB). "
+        "Returns the predicted class, confidence, class probabilities, and model version. "
+        "Login is optional; signed-in users use their selected model, while other requests use v1. "
+        "Other kinds of images may still receive a confident but meaningless result."
+    ),
+    tags=["Prediction"],
+)
+async def predict(
+    request: Request,
+    file: UploadFile = File(
+        ...,
+        description="One JPEG or PNG bean-leaf photo, maximum 10 MB.",
+    ),
+):
+    """Classify one valid bean-leaf image."""
     contents = _read_bounded_upload(file, MAX_UPLOAD_BYTES)
     user = _optional_user(request) if request else None
     version = (
@@ -280,13 +355,28 @@ def schedule_retraining(background_tasks, owner_id, message, epochs, starting_ve
     return True
 
 
-@app.post("/upload")
+@app.post(
+    "/upload",
+    summary="Upload labeled images",
+    description=(
+        "Requires a signed-in account. Upload 1–100 JPEG or PNG images and choose the correct "
+        "class label for all files. Each image is limited to 10 MB. Accepted images are queued "
+        "for your next retraining run; they do not immediately alter the model."
+    ),
+    tags=["Training data"],
+)
 async def upload(
     request: Request,
-    label: str = Form(...),
-    files: list[UploadFile] = File(...),
+    label: str = Form(
+        ...,
+        description="Correct class label for every image: angular_leaf_spot, bean_rust, or healthy.",
+    ),
+    files: list[UploadFile] = File(
+        ...,
+        description="Between 1 and 100 JPEG or PNG images, each no larger than 10 MB.",
+    ),
 ):
-    """Upload multiple labeled images for the authenticated user's retraining data."""
+    """Queue labeled images for retraining; this does not immediately change the model."""
     user = _required_user(request)
     class_names = config.load_class_names()
     if label not in class_names:
@@ -319,10 +409,22 @@ def normalise(name):
     return name.strip().lower().replace(" ", "_").replace("-", "_")
 
 
-@app.post("/upload-zip")
+@app.post(
+    "/upload-zip",
+    summary="Upload a ZIP of labeled images",
+    description=(
+        "Requires a signed-in account. Upload one standard ZIP (up to 500 MB) with class-named "
+        "folders at its root, for example `healthy/leaf.jpg` and `bean_rust/leaf.jpg`. "
+        "Images are queued for your next retraining run; they do not immediately alter the model."
+    ),
+    tags=["Training data"],
+)
 async def upload_zip(
     request: Request,
-    file: UploadFile = File(...),
+    file: UploadFile = File(
+        ...,
+        description="A single ZIP archive with angular_leaf_spot/, bean_rust/, and/or healthy/ folders at its root.",
+    ),
 ):
     """Upload a zip organized as one folder per class label."""
     user = _required_user(request)
@@ -398,7 +500,16 @@ async def upload_zip(
     }
 
 
-@app.post("/retrain")
+@app.post(
+    "/retrain",
+    summary="Start model retraining",
+    description=(
+        "Requires a signed-in account with pending uploaded images. Optionally provide JSON "
+        "`{\"epochs\": 5}`; the range is 1–20 and the default is 5. Training runs in the background "
+        "from your selected model. Check `GET /status` for progress and outcome."
+    ),
+    tags=["Retraining"],
+)
 def retrain(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -428,7 +539,12 @@ def _count_images(folder):
     return sum(1 for filename in os.listdir(folder) if filename.lower().endswith(IMAGE_EXTENSIONS))
 
 
-@app.get("/insights")
+@app.get(
+    "/insights",
+    summary="Get dataset insights",
+    description="Returns image counts by dataset split and class, plus average RGB values for dashboard exploration.",
+    tags=["Insights"],
+)
 def insights():
     """Dataset split counts and average RGB values for visual exploration."""
     class_names = config.load_class_names()
@@ -471,6 +587,8 @@ def custom_openapi():
         title=app.title,
         version=app.version,
         openapi_version=app.openapi_version,
+        description=app.description,
+        tags=app.openapi_tags,
         routes=app.routes,
     )
 
